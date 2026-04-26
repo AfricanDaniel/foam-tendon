@@ -1,0 +1,5 @@
+# MoveByDegrees.srv
+float32 degrees
+---
+bool success
+string message

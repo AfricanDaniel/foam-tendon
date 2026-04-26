@@ -1,0 +1,7 @@
+# Direction string: N, S, E, W, NE, NW, SE, SW (case-insensitive)
+string direction
+# String travel distance in degrees (must be positive)
+float32 degrees
+---
+bool success
+string message
