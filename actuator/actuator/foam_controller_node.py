@@ -360,16 +360,11 @@ class FoamControllerNode(Node):
     # ── Signal handling ───────────────────────────────────────────────────────
 
     def _handle_signal(self, sig, frame) -> None:
-        """
-        Ctrl-C / SIGTERM handler: stop all motors in place and save positions,
-        then trigger a clean rclpy shutdown.  Idempotent – safe to fire twice.
-        """
-        if not self._stop_requested:
-            self._stop_requested = True
-            self.get_logger().info(
-                'Shutdown signal received – stopping motors and saving state.'
-            )
-            self._emergency_stop()
+        # Keep this handler minimal — calling get_logger() or any DDS API from
+        # a signal handler deadlocks because the rclpy executor holds a lock.
+        # All cleanup (emergency stop, torque disable, CSV save) runs in
+        # destroy_node(), which is called from the finally block in main().
+        self._stop_requested = True
         if rclpy.ok():
             rclpy.shutdown()
 
@@ -588,19 +583,26 @@ def main(args=None) -> None:
     node = None
     try:
         node = FoamControllerNode()
-        rclpy.spin(node)
-    except KeyboardInterrupt:
+        # spin_once with a short timeout so the loop wakes and checks
+        # _stop_requested even if the C-level rcl_wait doesn't exit immediately
+        # after rclpy.shutdown() is called from the signal handler.
+        while rclpy.ok() and not node._stop_requested:
+            rclpy.spin_once(node, timeout_sec=0.5)
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
         pass
     except RuntimeError as exc:
         print(f'[foam_controller_node] Fatal: {exc}')
     finally:
         if node is not None:
+            node._stop_requested = True
             try:
                 node.destroy_node()
             except Exception:
                 pass
-        if rclpy.ok():
+        try:
             rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
