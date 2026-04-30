@@ -4,6 +4,7 @@ import csv
 import math
 import os
 import signal
+import threading
 import time
 
 import rclpy
@@ -17,6 +18,13 @@ from dynamixel_sdk import (
     PacketHandler,
     COMM_SUCCESS,
 )
+
+try:
+    from actuator.natnet import NatNetClient as _NatNetClient
+    _NATNET_AVAILABLE = True
+except ImportError:
+    _NatNetClient = None
+    _NATNET_AVAILABLE = False
 
 # ── Hardware ──────────────────────────────────────────────────────────────────
 DEVICENAME = '/dev/ttyUSB0'
@@ -35,6 +43,7 @@ ADDR_OPERATING_MODE   = 11
 ADDR_TORQUE_ENABLE    = 64
 ADDR_PROFILE_VELOCITY = 112
 ADDR_GOAL_POSITION    = 116
+ADDR_PRESENT_VELOCITY = 128
 ADDR_PRESENT_POSITION = 132
 
 EXTENDED_POSITION_CONTROL_MODE = 4
@@ -45,9 +54,6 @@ MOVING_THRESHOLD = 10             # pulses; within this = "arrived"
 PULSES_PER_DEGREE = 4096 / 360.0
 
 # ── Direction table ───────────────────────────────────────────────────────────
-# Each entry is a normalised (dx, dy) unit vector.
-# dx > 0 → East,  dx < 0 → West
-# dy > 0 → North, dy < 0 → South
 _S2 = 1.0 / math.sqrt(2.0)
 DIRECTION_VECTORS: dict[str, tuple[float, float]] = {
     'N':         (0.0,  1.0),
@@ -68,10 +74,12 @@ DIRECTION_VECTORS: dict[str, tuple[float, float]] = {
     'SOUTHWEST': (-_S2, -_S2),
 }
 
-# ── State file ────────────────────────────────────────────────────────────────
-# Walk up from this file until we find the directory that contains `src/`.
-# That is the workspace root regardless of whether we're running from source
-# (src/actuator/actuator/) or from the install tree (install/actuator/lib/actuator/).
+# ── OptiTrack ─────────────────────────────────────────────────────────────────
+NATNET_SERVER_IP  = '129.105.73.172'
+OPTITRACK_TIMEOUT = 2.0   # seconds of silence → treated as unavailable
+COLLECT_HZ        = 50    # data collection sample rate
+
+# ── State / data directories ──────────────────────────────────────────────────
 def _find_workspace_root() -> str:
     path = os.path.abspath(__file__)
     for _ in range(10):
@@ -83,7 +91,10 @@ def _find_workspace_root() -> str:
         path = parent
     return os.path.expanduser('~')
 
-STATE_FILE_DEFAULT = os.path.join(_find_workspace_root(), 'foam_motor_state.csv')
+STATE_FILE_DEFAULT  = os.path.join(_find_workspace_root(), 'foam_motor_state.csv')
+DATA_COLLECTION_DIR = os.path.join(
+    _find_workspace_root(), 'src', 'actuator', 'data_collection'
+)
 CSV_FIELDS = ['motor_id', 'current_position', 'home_position']
 
 
@@ -120,6 +131,15 @@ class FoamControllerNode(Node):
     On first run (no CSV), the current hardware positions become the home
     positions. On all subsequent runs, home positions are loaded from the CSV
     so that /go_home can always return the foam to its origin.
+
+    Data collection
+    ---------------
+    When /move_foam, /move_foam_circle, or /move_foam_square is called and
+    OptiTrack is live, a background thread records motor positions, motor
+    velocities (register 128, units of 0.229 RPM), and OptiTrack rigid-body
+    pose at ~50 Hz into a timestamped CSV under data_collection/.
+
+    If OptiTrack is not available the move executes normally with no CSV.
     """
 
     def __init__(self) -> None:
@@ -135,6 +155,23 @@ class FoamControllerNode(Node):
         self._destroyed = False
         self.current_positions: dict[int, int] = {mid: 0 for mid in ALL_MOTORS}
         self.home_positions:    dict[int, int] = {mid: 0 for mid in ALL_MOTORS}
+
+        # Serialises all Dynamixel port access so the data-collection thread
+        # and the main executor thread never race on the serial bus.
+        self._port_lock = threading.Lock()
+
+        # OptiTrack live state (written by NatNet callbacks, read by collector)
+        self._optitrack_client = None
+        self._optitrack_available = False
+        self._optitrack_pos = None        # list [x, y, z]
+        self._optitrack_rot = None        # list [qx, qy, qz, qw]
+        self._optitrack_lock = threading.Lock()
+        self._last_optitrack_time = 0.0
+        self._optitrack_frame_count = 0   # total NatNet frames received
+        self._optitrack_rb_count = 0      # total rigid-body callbacks received
+
+        # Ensure the data collection directory exists
+        os.makedirs(DATA_COLLECTION_DIR, exist_ok=True)
 
         # Load last known state BEFORE touching hardware so that if a motor is
         # offline on startup we still have its last commanded position on hand.
@@ -174,21 +211,25 @@ class FoamControllerNode(Node):
         self.create_service(MoveFoamSquare, '/move_foam_square', self._cb_move_square)
         self.create_service(Trigger,        '/go_home',          self._cb_go_home)
         self.create_service(Trigger,        '/set_home',         self._cb_set_home)
+        self.create_service(Trigger,        '/optitrack_status', self._cb_optitrack_status)
+
+        self._start_optitrack()
+
+        # One-shot timer: report optitrack data flow 5 s after startup
+        self._startup_check_timer = self.create_timer(5.0, self._cb_optitrack_startup_check)
 
         home_str = ', '.join(f'M{m}={self.home_positions[m]}' for m in ALL_MOTORS)
         self.get_logger().info(
             f'FoamControllerNode ready.\n'
-            f'  State file : {self.state_file}\n'
-            f'  Home poses : {home_str}'
+            f'  State file     : {self.state_file}\n'
+            f'  Data directory : {DATA_COLLECTION_DIR}\n'
+            f'  Home poses     : {home_str}\n'
+            f'  OptiTrack      : {"connected" if self._optitrack_available else "not available"}'
         )
 
     # ── State file ────────────────────────────────────────────────────────────
 
     def _load_state_from_csv(self) -> bool:
-        """
-        Populate current_positions and home_positions from CSV.
-        Returns True if the file existed and was fully valid.
-        """
         if not os.path.exists(self.state_file):
             return False
         try:
@@ -211,7 +252,6 @@ class FoamControllerNode(Node):
             return False
 
     def _save_state(self) -> None:
-        """Overwrite the CSV with the latest current and home positions."""
         try:
             with open(self.state_file, 'w', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
@@ -247,22 +287,18 @@ class FoamControllerNode(Node):
     # ── Low-level helpers ─────────────────────────────────────────────────────
 
     def _read_position(self, motor_id: int) -> int:
-        """Read present position with unsigned→signed conversion and retry."""
+        """Read present position; acquires port lock on each attempt."""
         for _ in range(5):
-            raw, comm, err = self.packet_handler.read4ByteTxRx(
-                self.port_handler, motor_id, ADDR_PRESENT_POSITION
-            )
+            with self._port_lock:
+                raw, comm, err = self.packet_handler.read4ByteTxRx(
+                    self.port_handler, motor_id, ADDR_PRESENT_POSITION
+                )
             if comm == COMM_SUCCESS and err == 0:
-                # Extended position control uses signed 32-bit values
                 return raw if raw <= 0x7FFFFFFF else raw - 0x100000000
             time.sleep(0.01)
         raise RuntimeError(f'Motor {motor_id}: position read failed after 5 attempts')
 
     def _compute_motor_commands(self, dx: float, dy: float) -> dict[int, float]:
-        """
-        Convert (dx=East, dy=North) displacement to {motor_id: degrees}.
-        See class docstring for the derivation of the -dy / -dx formula.
-        """
         return {
             MOTOR_NORTH: -dy,
             MOTOR_SOUTH: -dy,
@@ -271,15 +307,10 @@ class FoamControllerNode(Node):
         }
 
     def _write_goal(self, motor_id: int, target: int) -> bool:
-        """
-        Write a goal position to one motor using write4ByteTxRx (the same API
-        used by motor_service_node, proven reliable).
-        target is a signed Python int; it is masked to unsigned 32-bit for the SDK.
-        Returns True on success.
-        """
-        comm, err = self.packet_handler.write4ByteTxRx(
-            self.port_handler, motor_id, ADDR_GOAL_POSITION, target & 0xFFFFFFFF
-        )
+        with self._port_lock:
+            comm, err = self.packet_handler.write4ByteTxRx(
+                self.port_handler, motor_id, ADDR_GOAL_POSITION, target & 0xFFFFFFFF
+            )
         if comm != COMM_SUCCESS or err != 0:
             self.get_logger().error(
                 f'Motor {motor_id}: goal write FAILED  comm={comm}  err={err}'
@@ -288,11 +319,6 @@ class FoamControllerNode(Node):
         return True
 
     def _execute(self, commands: dict[int, float]) -> None:
-        """
-        Send relative degree commands to each motor individually (write4ByteTxRx),
-        then persist state.  Individual writes are used instead of GroupSyncWrite
-        because GroupSyncWrite silently drops commands on some motor IDs.
-        """
         for motor_id, degrees in commands.items():
             if abs(degrees) < 1e-4:
                 continue
@@ -302,18 +328,12 @@ class FoamControllerNode(Node):
         self._save_state()
 
     def _send_absolute(self, positions: dict[int, int]) -> None:
-        """Send absolute goal positions to each motor individually."""
         for motor_id, target in positions.items():
             if self._write_goal(motor_id, target):
                 self.current_positions[motor_id] = target
         self._save_state()
 
     def _wait_for_all(self, timeout: float = 10.0) -> bool:
-        """
-        Block until every motor is within MOVING_THRESHOLD of its target.
-        Returns False on timeout, stop request, or motor disconnection.
-        Saves state immediately if a disconnection is detected.
-        """
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self._stop_requested:
@@ -332,12 +352,6 @@ class FoamControllerNode(Node):
         return False
 
     def _emergency_stop(self) -> None:
-        """
-        Read actual motor positions, command goal = present (halt in place),
-        then save state to CSV.  Safe to call from a signal handler or on
-        power-loss detection; all hardware errors are silently swallowed so
-        the CSV write always happens.
-        """
         if not self._port_open:
             self._save_state()
             return
@@ -349,32 +363,218 @@ class FoamControllerNode(Node):
                 if comm == COMM_SUCCESS and err == 0:
                     signed = raw if raw <= 0x7FFFFFFF else raw - 0x100000000
                     self.current_positions[mid] = signed
-                    # raw is already unsigned 32-bit; write goal = present to halt
                     self.packet_handler.write4ByteTxRx(
                         self.port_handler, mid, ADDR_GOAL_POSITION, raw
                     )
             except Exception:
-                pass  # motor unreachable; keep last commanded position
+                pass
         self._save_state()
 
     # ── Signal handling ───────────────────────────────────────────────────────
 
     def _handle_signal(self, sig, frame) -> None:
-        # Keep this handler minimal — calling get_logger() or any DDS API from
-        # a signal handler deadlocks because the rclpy executor holds a lock.
-        # All cleanup (emergency stop, torque disable, CSV save) runs in
-        # destroy_node(), which is called from the finally block in main().
         self._stop_requested = True
         if rclpy.ok():
             rclpy.shutdown()
 
+    # ── OptiTrack ─────────────────────────────────────────────────────────────
+
+    def _start_optitrack(self) -> None:
+        if not _NATNET_AVAILABLE:
+            self.get_logger().warn(
+                'NatNet SDK not found – OptiTrack disabled.'
+            )
+            return
+        try:
+            client = _NatNetClient()
+            client.set_client_address('0.0.0.0')
+            client.set_server_address(NATNET_SERVER_IP)
+            client.set_use_multicast(False)
+            client.set_print_level(0)
+            client.new_frame_listener    = self._optitrack_frame_cb
+            client.rigid_body_listener   = self._optitrack_rigid_body_cb
+            # 'd' = datastream mode (rigid body + frame data)
+            if client.run('d'):
+                self._optitrack_client    = client
+                self._optitrack_available = True
+                self.get_logger().info(f'OptiTrack connected to {NATNET_SERVER_IP}')
+            else:
+                self.get_logger().warn(
+                    'OptiTrack connection failed – moves will execute without data collection.'
+                )
+        except Exception as exc:
+            self.get_logger().warn(f'OptiTrack init error ({exc}) – continuing without it.')
+
+    def _optitrack_frame_cb(self, data_frame) -> None:
+        self._optitrack_frame_count += 1
+        if self._optitrack_frame_count == 1:
+            self.get_logger().info('OptiTrack: first NatNet frame received.')
+
+    def _optitrack_rigid_body_cb(self, rigid_body_id, pos, rot) -> None:
+        self._optitrack_rb_count += 1
+        if self._optitrack_rb_count == 1:
+            self.get_logger().info(
+                f'OptiTrack: first rigid body received  id={rigid_body_id}'
+                f'  pos=({pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f})'
+            )
+        with self._optitrack_lock:
+            self._optitrack_pos = list(pos)
+            self._optitrack_rot = list(rot)
+            self._last_optitrack_time = time.time()
+
+    def _is_optitrack_live(self) -> bool:
+        """True if the NatNet client successfully connected."""
+        return self._optitrack_available
+
+    def _cb_optitrack_startup_check(self) -> None:
+        """Fires once 5 s after startup to report whether data is flowing."""
+        self.destroy_timer(self._startup_check_timer)   # one-shot
+        if not self._optitrack_available:
+            return
+        if self._optitrack_frame_count == 0:
+            self.get_logger().warn(
+                'OptiTrack: connected to Motive but ZERO frames received after 5 s.\n'
+                '  Check Motive → Edit → Settings → Streaming:\n'
+                '    • "Broadcast Frame Data" must be ON\n'
+                '    • Transmission type must be "Unicast"\n'
+                '    • Local Interface should match this machine\'s IP on the OptiTrack network'
+            )
+        elif self._optitrack_rb_count == 0:
+            self.get_logger().warn(
+                f'OptiTrack: {self._optitrack_frame_count} frames received but ZERO rigid bodies.\n'
+                '  Make sure at least one Rigid Body asset exists and is active in Motive.'
+            )
+        else:
+            self.get_logger().info(
+                f'OptiTrack OK: {self._optitrack_frame_count} frames, '
+                f'{self._optitrack_rb_count} rigid-body callbacks in first 5 s.'
+            )
+
+    def _cb_optitrack_status(
+        self, request: Trigger.Request, response: Trigger.Response
+    ):
+        """Return a human-readable OptiTrack status string."""
+        if not self._optitrack_available:
+            response.success = False
+            response.message = 'OptiTrack not connected (NatNet client failed to start).'
+            return response
+
+        with self._optitrack_lock:
+            pos = list(self._optitrack_pos) if self._optitrack_pos is not None else None
+            rot = list(self._optitrack_rot) if self._optitrack_rot is not None else None
+            last_t = self._last_optitrack_time
+
+        age = time.time() - last_t if last_t > 0 else float('inf')
+        lines = [
+            f'NatNet frames received : {self._optitrack_frame_count}',
+            f'Rigid-body callbacks   : {self._optitrack_rb_count}',
+            f'Last rigid-body data   : {age:.2f} s ago' if age < 1e9 else 'Last rigid-body data   : never',
+        ]
+        if pos is not None:
+            lines.append(f'Last position (x,y,z)  : ({pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f})')
+            lines.append(f'Last rotation (qx,y,z,w): ({rot[0]:.4f}, {rot[1]:.4f}, {rot[2]:.4f}, {rot[3]:.4f})')
+        response.success = self._optitrack_rb_count > 0
+        response.message = '\n'.join(lines)
+        return response
+
+    # ── Data collection ───────────────────────────────────────────────────────
+
+    def _make_csv_path(self, label: str) -> str:
+        """Return a unique, systematically named path for a new collection CSV."""
+        existing = sum(1 for f in os.listdir(DATA_COLLECTION_DIR) if f.endswith('.csv'))
+        run_num  = existing + 1
+        ts       = time.strftime('%Y%m%d_%H%M%S')
+        filename = f'run_{run_num:04d}_{ts}_{label}.csv'
+        return os.path.join(DATA_COLLECTION_DIR, filename)
+
+    def _collect_data(self, csv_path: str, stop_event: threading.Event) -> None:
+        """
+        Background thread: samples motor positions+velocities and OptiTrack pose
+        at ~COLLECT_HZ Hz, writing one row per sample to csv_path.
+
+        Motor velocity units: raw register value (1 unit = 0.229 RPM).
+        Position units: Dynamixel pulses (4096 per revolution).
+        OptiTrack position: NatNet coordinate units (meters if Motive default).
+        OptiTrack rotation: quaternion (qx, qy, qz, qw).
+        """
+        fields = [
+            'timestamp_s',
+            'motor_1_pos', 'motor_2_pos', 'motor_3_pos', 'motor_4_pos',
+            'motor_1_vel', 'motor_2_vel', 'motor_3_vel', 'motor_4_vel',
+            'optitrack_x', 'optitrack_y', 'optitrack_z',
+            'optitrack_qx', 'optitrack_qy', 'optitrack_qz', 'optitrack_qw',
+        ]
+        interval = 1.0 / COLLECT_HZ
+        t0 = time.time()
+
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            writer.writeheader()
+
+            while not stop_event.is_set():
+                row: dict = {'timestamp_s': f'{time.time() - t0:.4f}'}
+
+                for mid in ALL_MOTORS:
+                    pos_val = vel_val = ''
+                    try:
+                        with self._port_lock:
+                            raw_p, cp, ep = self.packet_handler.read4ByteTxRx(
+                                self.port_handler, mid, ADDR_PRESENT_POSITION)
+                            raw_v, cv, ev = self.packet_handler.read4ByteTxRx(
+                                self.port_handler, mid, ADDR_PRESENT_VELOCITY)
+                        if cp == COMM_SUCCESS and ep == 0:
+                            pos_val = raw_p if raw_p <= 0x7FFFFFFF else raw_p - 0x100000000
+                        if cv == COMM_SUCCESS and ev == 0:
+                            vel_val = raw_v if raw_v <= 0x7FFFFFFF else raw_v - 0x100000000
+                    except Exception:
+                        pass
+                    row[f'motor_{mid}_pos'] = pos_val
+                    row[f'motor_{mid}_vel'] = vel_val
+
+                with self._optitrack_lock:
+                    p = list(self._optitrack_pos) if self._optitrack_pos is not None else None
+                    r = list(self._optitrack_rot) if self._optitrack_rot is not None else None
+
+                if p is not None:
+                    row['optitrack_x'] = f'{p[0]:.6f}'
+                    row['optitrack_y'] = f'{p[1]:.6f}'
+                    row['optitrack_z'] = f'{p[2]:.6f}'
+                else:
+                    row['optitrack_x'] = row['optitrack_y'] = row['optitrack_z'] = ''
+
+                if r is not None:
+                    row['optitrack_qx'] = f'{r[0]:.6f}'
+                    row['optitrack_qy'] = f'{r[1]:.6f}'
+                    row['optitrack_qz'] = f'{r[2]:.6f}'
+                    row['optitrack_qw'] = f'{r[3]:.6f}'
+                else:
+                    row['optitrack_qx'] = row['optitrack_qy'] = \
+                        row['optitrack_qz'] = row['optitrack_qw'] = ''
+
+                writer.writerow(row)
+                f.flush()
+                stop_event.wait(interval)
+
+        self.get_logger().info(f'Collection saved → {csv_path}')
+
+    def _start_collection(self, label: str):
+        """Create CSV path, spawn collection thread. Returns (stop_event, thread)."""
+        csv_path   = self._make_csv_path(label)
+        self.get_logger().info(f'Data collection started → {os.path.basename(csv_path)}')
+        stop_event = threading.Event()
+        thread     = threading.Thread(
+            target=self._collect_data, args=(csv_path, stop_event), daemon=True
+        )
+        thread.start()
+        return stop_event, thread
+
+    def _stop_collection(self, stop_event: threading.Event, thread: threading.Thread) -> None:
+        stop_event.set()
+        thread.join(timeout=2.0)
+
     # ── Service callbacks ─────────────────────────────────────────────────────
 
     def _cb_go_home(self, request: Trigger.Request, response: Trigger.Response):
-        """
-        Move all four motors to their saved home positions simultaneously,
-        then reset the CSV so current_position == home_position for each motor.
-        """
         if self._stop_requested:
             response.success = False
             response.message = 'Node is shutting down'
@@ -387,7 +587,6 @@ class FoamControllerNode(Node):
             response.message = 'Motors did not reach home (timeout or interrupt)'
             return response
 
-        # Synchronise tracked positions with home and write a clean CSV
         for mid in ALL_MOTORS:
             self.current_positions[mid] = self.home_positions[mid]
         self._save_state()
@@ -400,11 +599,6 @@ class FoamControllerNode(Node):
         return response
 
     def _cb_set_home(self, request: Trigger.Request, response: Trigger.Response):
-        """
-        Declare the foam's current position as the new home.
-        Reads live encoder values, overwrites home_position in the CSV,
-        and resets current_position to match so the file is clean.
-        """
         if self._stop_requested:
             response.success = False
             response.message = 'Node is shutting down'
@@ -414,7 +608,7 @@ class FoamControllerNode(Node):
             try:
                 pos = self._read_position(mid)
             except RuntimeError:
-                pos = self.current_positions[mid]  # fallback to last known
+                pos = self.current_positions[mid]
             self.home_positions[mid]    = pos
             self.current_positions[mid] = pos
         self._save_state()
@@ -448,10 +642,23 @@ class FoamControllerNode(Node):
         commands = self._compute_motor_commands(dx_n * request.degrees, dy_n * request.degrees)
 
         self.get_logger().info(f'MoveFoam  dir={direction}  deg={request.degrees:.2f}')
+
+        collecting = self._is_optitrack_live()
+        if collecting:
+            label = f'move_{direction}_{request.degrees:.1f}deg'
+            stop_event, collector = self._start_collection(label)
+        else:
+            self.get_logger().warn('OptiTrack not connected – skipping data collection.')
+
         self._execute(commands)
-        if not self._wait_for_all():
+        moved_ok = self._wait_for_all()
+
+        if collecting:
+            self._stop_collection(stop_event, collector)
+
+        if not moved_ok:
             response.success = False
-            response.message = f'Motors did not reach target (timeout or interrupt)'
+            response.message = 'Motors did not reach target (timeout or interrupt)'
             return response
 
         response.success = True
@@ -481,15 +688,22 @@ class FoamControllerNode(Node):
             f'delay={step_delay:.2f}s  cw={clockwise}'
         )
 
-        # CW increments θ from North; exact finite differences guarantee the
-        # foam returns to its starting position after one full revolution.
-        sign = 1.0 if clockwise else -1.0
+        collecting = self._is_optitrack_live()
+        if collecting:
+            label = f'circle_r{radius:.1f}_s{steps}_{"cw" if clockwise else "ccw"}'
+            stop_event, collector = self._start_collection(label)
+        else:
+            self.get_logger().warn('OptiTrack not connected – skipping data collection.')
+
+        sign      = 1.0 if clockwise else -1.0
+        result_ok = True
+        fail_step = -1
 
         for i in range(steps):
             if self._stop_requested:
-                response.success = False
-                response.message = 'Interrupted by shutdown signal'
-                return response
+                result_ok = False
+                fail_step = i
+                break
 
             theta_a = sign * 2.0 * math.pi * i       / steps
             theta_b = sign * 2.0 * math.pi * (i + 1) / steps
@@ -499,11 +713,19 @@ class FoamControllerNode(Node):
 
             self._execute(self._compute_motor_commands(dx, dy))
             if not self._wait_for_all(timeout=max(step_delay * 3, 2.0)):
-                response.success = False
-                response.message = f'Circle interrupted at step {i + 1}/{steps}'
-                return response
+                result_ok = False
+                fail_step = i + 1
+                break
             if step_delay > 0.0:
                 time.sleep(step_delay)
+
+        if collecting:
+            self._stop_collection(stop_event, collector)
+
+        if not result_ok:
+            response.success = False
+            response.message = f'Circle interrupted at step {fail_step}/{steps}'
+            return response
 
         response.success = True
         response.message = (
@@ -532,21 +754,42 @@ class FoamControllerNode(Node):
             f'MoveFoamSquare  side={side:.2f}  delay={step_delay:.2f}s'
         )
 
-        # North → East → South → West traces a closed square
-        for label, dx, dy in [('N', 0.0, side), ('E', side, 0.0),
-                               ('S', 0.0, -side), ('W', -side, 0.0)]:
+        collecting = self._is_optitrack_live()
+        if collecting:
+            csv_label = f'square_side{side:.1f}'
+            stop_event, collector = self._start_collection(csv_label)
+        else:
+            self.get_logger().warn('OptiTrack not connected – skipping data collection.')
+
+        result_ok = True
+        fail_side = ''
+
+        for side_dir, dx, dy in [
+            ('N', 0.0,  side),
+            ('E', side, 0.0),
+            ('S', 0.0, -side),
+            ('W', -side, 0.0),
+        ]:
             if self._stop_requested:
-                response.success = False
-                response.message = 'Interrupted by shutdown signal'
-                return response
+                result_ok = False
+                fail_side = side_dir
+                break
 
             self._execute(self._compute_motor_commands(dx, dy))
             if not self._wait_for_all(timeout=max(step_delay * 3, 5.0)):
-                response.success = False
-                response.message = f'Square interrupted on {label} side (timeout or interrupt)'
-                return response
+                result_ok = False
+                fail_side = side_dir
+                break
             if step_delay > 0.0:
                 time.sleep(step_delay)
+
+        if collecting:
+            self._stop_collection(stop_event, collector)
+
+        if not result_ok:
+            response.success = False
+            response.message = f'Square interrupted on {fail_side} side (timeout or interrupt)'
+            return response
 
         response.success = True
         response.message = f'Square complete: side={side:.2f} deg'
@@ -555,14 +798,15 @@ class FoamControllerNode(Node):
     # ── Cleanup ───────────────────────────────────────────────────────────────
 
     def destroy_node(self) -> None:
-        """
-        Called on any clean exit path.  Stops motors in place, saves state,
-        disables torque, and closes the serial port.
-        Guard against rclpy calling this a second time during context shutdown.
-        """
         if self._destroyed:
             return
         self._destroyed = True
+        if self._optitrack_client is not None:
+            try:
+                self._optitrack_client.shutdown()
+            except Exception:
+                pass
+            self._optitrack_client = None
         self._emergency_stop()
         if self._port_open:
             for mid in ALL_MOTORS:
@@ -583,9 +827,6 @@ def main(args=None) -> None:
     node = None
     try:
         node = FoamControllerNode()
-        # spin_once with a short timeout so the loop wakes and checks
-        # _stop_requested even if the C-level rcl_wait doesn't exit immediately
-        # after rclpy.shutdown() is called from the signal handler.
         while rclpy.ok() and not node._stop_requested:
             rclpy.spin_once(node, timeout_sec=0.5)
     except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
