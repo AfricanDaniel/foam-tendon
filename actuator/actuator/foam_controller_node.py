@@ -523,7 +523,8 @@ class FoamControllerNode(Node):
                             raw_v, cv, ev = self.packet_handler.read4ByteTxRx(
                                 self.port_handler, mid, ADDR_PRESENT_VELOCITY)
                         if cp == COMM_SUCCESS and ep == 0:
-                            pos_val = raw_p if raw_p <= 0x7FFFFFFF else raw_p - 0x100000000
+                            abs_pos = raw_p if raw_p <= 0x7FFFFFFF else raw_p - 0x100000000
+                            pos_val = abs_pos - self.home_positions[mid]
                         if cv == COMM_SUCCESS and ev == 0:
                             vel_val = raw_v if raw_v <= 0x7FFFFFFF else raw_v - 0x100000000
                     except Exception:
@@ -581,8 +582,19 @@ class FoamControllerNode(Node):
             return response
         self.get_logger().info('GoHome: returning to home positions.')
 
+        collecting = self._is_optitrack_live()
+        if collecting:
+            stop_event, collector = self._start_collection('go_home')
+        else:
+            self.get_logger().warn('OptiTrack not connected – skipping data collection.')
+
         self._send_absolute(dict(self.home_positions))
-        if not self._wait_for_all():
+        moved_ok = self._wait_for_all()
+
+        if collecting:
+            self._stop_collection(stop_event, collector)
+
+        if not moved_ok:
             response.success = False
             response.message = 'Motors did not reach home (timeout or interrupt)'
             return response

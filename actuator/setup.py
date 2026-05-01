@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'motor_service_node = actuator.motor_service_node:main',
             'foam_controller_node = actuator.foam_controller_node:main',
+            'collect_training_data = actuator.collect_training_data:main',
         ],
     },
 )

@@ -325,6 +325,111 @@ ros2 service call /move_foam_square actuator_interfaces/srv/MoveFoamSquare \
 
 ---
 
+## Training Data Collection (`collect_training_data`)
+
+Automated script that drives the foam through a systematic set of moves to
+generate diverse position and trajectory data for neural network training.
+`foam_controller_node` already saves motor + OptiTrack CSVs to
+`data_collection/` on every service call, so this script just sequences the
+calls.
+
+### Prerequisites
+
+`foam_controller_node` must be running and OptiTrack must be live before
+starting the collector.
+
+```bash
+# Terminal 1
+ros2 run actuator foam_controller_node
+
+# Terminal 2 — run after the node prints "FoamControllerNode ready"
+ros2 run actuator collect_training_data
+```
+
+### Dry run (always do this first)
+
+Open `actuator/actuator/collect_training_data.py` and set:
+
+```python
+DRY_RUN = True
+```
+
+Then rebuild and run.  The full command sequence will be printed without any
+hardware movement so you can verify nothing looks dangerous.
+
+```bash
+colcon build --packages-select actuator && source install/setup.bash
+ros2 run actuator collect_training_data
+```
+
+### What the script does
+
+The script runs six phases in order, returning to the home position after
+every move group:
+
+| Phase | Content | Move count |
+|-------|---------|-----------|
+| 1 | 8 directions × 3 amplitudes, single step | 24 groups |
+| 2 | 10 two-step combos (dir A → dir B → home) | 10 groups |
+| 3 | 6 three-step combos (dir A → B → C → home) | 6 groups |
+| 4 | Axis oscillations (out → partial return → home) | 16 groups |
+| 5 | Full circles CW + CCW at 3 radii | 6 groups |
+| 6 | Squares at 3 side lengths | 3 groups |
+
+Each **group** triggers its own CSV file in `data_collection/` (via
+`foam_controller_node`) so every move and the return-home are logged
+separately.
+
+### Parameters
+
+All parameters are at the top of `actuator/actuator/collect_training_data.py`.
+
+#### Safety parameters — adjust these first if the foam bends too far
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `MAX_DEGREES` | `150.0` | Hard cap on every single `/move_foam` call. **Reduce this first** if a single sweep bends the foam too much. |
+| `COMBO_AMPLITUDE` | `70.0` | Amplitude used in all multi-step combos (Phases 2–4). Two orthogonal steps at this value give ≈ 99° max displacement — lower this if combos over-bend the foam. |
+
+> **Rule of thumb:** if the foam looks stressed during a single north/south
+> sweep, halve `MAX_DEGREES`.  If it looks fine on single steps but bends too
+> far during combos, halve `COMBO_AMPLITUDE` instead.
+
+#### Data coverage parameters
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `AMPLITUDES` | `[60, 100, 140]` | Motor-travel magnitudes (degrees) for Phase 1 sweeps. Remove the largest value to reduce peak deflection. |
+| `CIRCLE_RADII` | `[50, 80, 110]` | Circle radii (degrees) for Phase 5. |
+| `CIRCLE_STEPS` | `36` | Discrete steps per revolution. More steps = smoother path but longer runtime. |
+| `CIRCLE_STEP_DELAY` | `0.2` | Seconds to pause between circle steps. Increase if motors miss steps. |
+| `SQUARE_SIDES` | `[60, 90, 120]` | Square side lengths (degrees) for Phase 6. |
+| `SQUARE_STEP_DELAY` | `0.5` | Seconds to pause between square sides. |
+
+#### Run control parameters
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `HOME_WAIT` | `1.5` | Seconds to wait after each `/go_home` before the next move. Increase if the foam still oscillates when the next move starts. |
+| `REPETITIONS` | `1` | How many times to run the full six-phase sequence. Set to 2–3 to multiply dataset size. |
+| `DRY_RUN` | `False` | Print the sequence without moving. **Always set to `True` and verify before the first real run.** |
+| `MOVE_TIMEOUT` | `30.0` | ROS service call timeout in seconds. Increase if slow motors cause timeouts. |
+
+### Output files
+
+Every service call in `foam_controller_node` creates one CSV file in:
+
+```
+single_column_foam_ros2_ws/src/actuator/data_collection/
+```
+
+File naming: `run_NNNN_YYYYMMDD_HHMMSS_<label>.csv`
+
+Each CSV contains timestamped motor positions, motor velocities, and
+OptiTrack position + quaternion at 50 Hz.
+
+---
+
 ## Custom Service Definitions (`actuator_interfaces`)
 
 ### `MoveByDegrees.srv`
