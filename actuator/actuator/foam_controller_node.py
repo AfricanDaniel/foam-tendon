@@ -588,8 +588,14 @@ class FoamControllerNode(Node):
         else:
             self.get_logger().warn('OptiTrack not connected – skipping data collection.')
 
+        max_delta_pulses = max(
+            abs(self.current_positions[mid] - self.home_positions[mid])
+            for mid in ALL_MOTORS
+        )
+        max_delta_deg = max_delta_pulses / PULSES_PER_DEGREE
+        home_timeout = max(10.0, max_delta_deg / (DEFAULT_VELOCITY * 0.229 * 6.0) * 1.5 + 5.0)
         self._send_absolute(dict(self.home_positions))
-        moved_ok = self._wait_for_all()
+        moved_ok = self._wait_for_all(timeout=home_timeout)
 
         if collecting:
             self._stop_collection(stop_event, collector)
@@ -663,7 +669,8 @@ class FoamControllerNode(Node):
             self.get_logger().warn('OptiTrack not connected – skipping data collection.')
 
         self._execute(commands)
-        moved_ok = self._wait_for_all()
+        move_timeout = max(10.0, request.degrees / (DEFAULT_VELOCITY * 0.229 * 6.0) * 1.5 + 5.0)
+        moved_ok = self._wait_for_all(timeout=move_timeout)
 
         if collecting:
             self._stop_collection(stop_event, collector)
@@ -723,8 +730,10 @@ class FoamControllerNode(Node):
             dx = radius * (math.sin(theta_b) - math.sin(theta_a))
             dy = radius * (math.cos(theta_b) - math.cos(theta_a))
 
+            step_deg = math.sqrt(dx * dx + dy * dy)
+            step_timeout = max(2.0, step_deg / (DEFAULT_VELOCITY * 0.229 * 6.0) * 1.5 + step_delay + 0.5)
             self._execute(self._compute_motor_commands(dx, dy))
-            if not self._wait_for_all(timeout=max(step_delay * 3, 2.0)):
+            if not self._wait_for_all(timeout=step_timeout):
                 result_ok = False
                 fail_step = i + 1
                 break
@@ -787,8 +796,9 @@ class FoamControllerNode(Node):
                 fail_side = side_dir
                 break
 
+            side_timeout = max(5.0, side / (DEFAULT_VELOCITY * 0.229 * 6.0) * 1.5 + step_delay + 0.5)
             self._execute(self._compute_motor_commands(dx, dy))
-            if not self._wait_for_all(timeout=max(step_delay * 3, 5.0)):
+            if not self._wait_for_all(timeout=side_timeout):
                 result_ok = False
                 fail_side = side_dir
                 break
