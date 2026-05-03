@@ -6,3 +6,5 @@ __pycache__/
 build/
 install/
 log/
+actuator/data_collection
+actuator/optitrack_data
