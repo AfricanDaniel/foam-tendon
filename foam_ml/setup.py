@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'foam_viz'
+package_name = 'foam_ml'
 
 setup(
     name=package_name,
@@ -15,15 +15,14 @@ setup(
     zip_safe=True,
     maintainer='daniel',
     maintainer_email='danielaugustin2027@u.northwestern.edu',
-    description='Visualization tools for the single-column foam robot',
+    description='ML models and interactive interfaces for the foam robot',
     license='TODO: License declaration',
-    extras_require={
-        'test': ['pytest'],
-    },
     entry_points={
         'console_scripts': [
-            'trajectory_replayer   = foam_viz.trajectory_replayer:main',
-            'compare_trajectories  = foam_viz.compare_trajectories:main',
+            'train_model         = foam_ml.train_model:main',
+            'option1_dome        = foam_ml.option1_dome:main',
+            'option2_coordinate  = foam_ml.option2_coordinate:main',
+            'option3_path_draw   = foam_ml.option3_path_draw:main',
         ],
     },
 )

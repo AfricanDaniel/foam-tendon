@@ -11,7 +11,7 @@ import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 
-from actuator_interfaces.srv import MoveFoam, MoveFoamCircle, MoveFoamSquare
+from actuator_interfaces.srv import MoveFoam, MoveFoamCircle, MoveFoamSquare, ExecuteMotorTrajectory
 
 from dynamixel_sdk import (
     PortHandler,
@@ -208,12 +208,13 @@ class FoamControllerNode(Node):
         signal.signal(signal.SIGINT,  self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
 
-        self.create_service(MoveFoam,       '/move_foam',        self._cb_move_foam)
-        self.create_service(MoveFoamCircle, '/move_foam_circle', self._cb_move_circle)
-        self.create_service(MoveFoamSquare, '/move_foam_square', self._cb_move_square)
-        self.create_service(Trigger,        '/go_home',          self._cb_go_home)
-        self.create_service(Trigger,        '/set_home',         self._cb_set_home)
-        self.create_service(Trigger,        '/optitrack_status', self._cb_optitrack_status)
+        self.create_service(MoveFoam,                '/move_foam',                 self._cb_move_foam)
+        self.create_service(MoveFoamCircle,          '/move_foam_circle',          self._cb_move_circle)
+        self.create_service(MoveFoamSquare,          '/move_foam_square',          self._cb_move_square)
+        self.create_service(Trigger,                 '/go_home',                   self._cb_go_home)
+        self.create_service(Trigger,                 '/set_home',                  self._cb_set_home)
+        self.create_service(Trigger,                 '/optitrack_status',          self._cb_optitrack_status)
+        self.create_service(ExecuteMotorTrajectory,  '/execute_motor_trajectory',  self._cb_execute_motor_trajectory)
 
         self._start_optitrack()
 
@@ -585,7 +586,7 @@ class FoamControllerNode(Node):
         self.get_logger().info(f'Collection saved → {csv_path}')
 
     def _start_collection(self, label: str):
-        """Create CSV path, spawn collection thread. Returns (stop_event, thread)."""
+        """Create CSV path, spawn collection thread. Returns (stop_event, thread, csv_path)."""
         csv_path   = self._make_csv_path(label)
         self.get_logger().info(f'Data collection started → {os.path.basename(csv_path)}')
         stop_event = threading.Event()
@@ -593,7 +594,7 @@ class FoamControllerNode(Node):
             target=self._collect_data, args=(csv_path, stop_event), daemon=True
         )
         thread.start()
-        return stop_event, thread
+        return stop_event, thread, csv_path
 
     def _stop_collection(self, stop_event: threading.Event, thread: threading.Thread) -> None:
         stop_event.set()
@@ -610,7 +611,7 @@ class FoamControllerNode(Node):
 
         collecting = self._is_optitrack_live()
         if collecting:
-            stop_event, collector = self._start_collection('go_home')
+            stop_event, collector, _csv_path = self._start_collection('go_home')
         else:
             self.get_logger().warn('OptiTrack not connected – skipping data collection.')
 
@@ -697,7 +698,7 @@ class FoamControllerNode(Node):
         collecting = self._is_optitrack_live()
         if collecting:
             label = f'move_{direction}_{request.degrees:.1f}deg'
-            stop_event, collector = self._start_collection(label)
+            stop_event, collector, _csv_path = self._start_collection(label)
         else:
             self.get_logger().warn('OptiTrack not connected – skipping data collection.')
 
@@ -743,7 +744,7 @@ class FoamControllerNode(Node):
         collecting = self._is_optitrack_live()
         if collecting:
             label = request.label.strip() or f'circle_r{radius:.1f}_s{steps}_{"cw" if clockwise else "ccw"}'
-            stop_event, collector = self._start_collection(label)
+            stop_event, collector, _csv_path = self._start_collection(label)
         else:
             self.get_logger().warn('OptiTrack not connected – skipping data collection.')
 
@@ -811,7 +812,7 @@ class FoamControllerNode(Node):
         collecting = self._is_optitrack_live()
         if collecting:
             csv_label = request.label.strip() or f'square_side{side:.1f}'
-            stop_event, collector = self._start_collection(csv_label)
+            stop_event, collector, _csv_path = self._start_collection(csv_label)
         else:
             self.get_logger().warn('OptiTrack not connected – skipping data collection.')
 
@@ -848,6 +849,91 @@ class FoamControllerNode(Node):
 
         response.success = True
         response.message = f'Square complete: side={side:.2f} deg'
+        return response
+
+    def _cb_execute_motor_trajectory(
+        self,
+        request: ExecuteMotorTrajectory.Request,
+        response: ExecuteMotorTrajectory.Response,
+    ):
+        """
+        Execute a sequence of motor position waypoints (pulses relative to home).
+
+        All four waypoint arrays must have the same length.  For each waypoint
+        the node computes absolute hardware positions (home + relative), writes
+        them to the motors, and waits until all motors arrive before advancing.
+        OptiTrack data is collected continuously across the whole trajectory.
+        """
+        if self._stop_requested:
+            response.success = False
+            response.message = 'Node is shutting down'
+            response.data_file = ''
+            return response
+
+        w1 = list(request.motor_1_waypoints)
+        w2 = list(request.motor_2_waypoints)
+        w3 = list(request.motor_3_waypoints)
+        w4 = list(request.motor_4_waypoints)
+        n  = len(w1)
+
+        if n == 0 or not (len(w2) == n and len(w3) == n and len(w4) == n):
+            response.success = False
+            response.message = 'All four waypoint arrays must be non-empty and equal length'
+            response.data_file = ''
+            return response
+
+        step_delay = max(float(request.step_delay), 0.0)
+        label      = request.label.strip() or 'ml_trajectory'
+
+        self.get_logger().info(
+            f'ExecuteMotorTrajectory: {n} waypoints, step_delay={step_delay:.2f}s, label={label}'
+        )
+
+        collecting = self._is_optitrack_live()
+        if collecting:
+            stop_event, collector, csv_path = self._start_collection(label)
+        else:
+            self.get_logger().warn('OptiTrack not live – trajectory will execute without recording.')
+            csv_path = ''
+
+        result_ok = True
+        fail_idx  = -1
+
+        for i, (r1, r2, r3, r4) in enumerate(zip(w1, w2, w3, w4)):
+            if self._stop_requested:
+                result_ok = False
+                fail_idx  = i
+                break
+
+            abs_positions = {
+                MOTOR_NORTH: self.home_positions[MOTOR_NORTH] + int(r1),
+                MOTOR_EAST:  self.home_positions[MOTOR_EAST]  + int(r2),
+                MOTOR_SOUTH: self.home_positions[MOTOR_SOUTH] + int(r3),
+                MOTOR_WEST:  self.home_positions[MOTOR_WEST]  + int(r4),
+            }
+            self._send_absolute(abs_positions)
+
+            timeout = max(step_delay * 3.0, 5.0)
+            if not self._wait_for_all(timeout=timeout):
+                result_ok = False
+                fail_idx  = i
+                break
+
+            if step_delay > 0.0:
+                time.sleep(step_delay)
+
+        if collecting:
+            self._stop_collection(stop_event, collector)
+
+        if not result_ok:
+            response.success = False
+            response.message = f'Trajectory interrupted at waypoint {fail_idx}/{n}'
+            response.data_file = csv_path
+            return response
+
+        response.success   = True
+        response.message   = f'Trajectory complete: {n} waypoints, label={label}'
+        response.data_file = csv_path
         return response
 
     # ── Cleanup ───────────────────────────────────────────────────────────────

@@ -49,12 +49,24 @@ running `foam_controller_node`.
 │   │       ├── MoveFoam.srv
 │   │       ├── MoveFoamCircle.srv
 │   │       ├── MoveFoamSquare.srv
-│   │       └── MoveByDegrees.srv
+│   │       ├── MoveByDegrees.srv
+│   │       └── ExecuteMotorTrajectory.srv
+│   │
+│   ├── foam_ml/                         ← ML models and interactive interfaces
+│   │   ├── README.md
+│   │   ├── models/                      # saved model files (generated at train time)
+│   │   └── foam_ml/
+│   │       ├── train_model.py           # retrain forward + inverse models from CSVs
+│   │       ├── model_utils.py           # inference, trajectory generation, ROS2 executor
+│   │       ├── option1_dome.py          # hemisphere workspace + click-to-place waypoints
+│   │       ├── option2_coordinate.py    # enter (East, North) mm target
+│   │       └── option3_path_draw.py     # click-drag to draw a free-hand path
 │   │
 │   └── foam_viz/                        ← trajectory replay and visualisation
 │       ├── README.md
 │       └── foam_viz/
-│           └── trajectory_replayer.py
+│           ├── trajectory_replayer.py
+│           └── compare_trajectories.py  # overlay predicted vs real trajectory
 │
 ├── foam_motor_state.csv                 ← persisted motor + home positions
 └── install/ build/ log/                 ← colcon output (not committed)
@@ -68,7 +80,8 @@ running `foam_controller_node`.
 |---|---|
 | ROS 2 Kilted | `source /opt/ros/kilted/setup.bash` |
 | Dynamixel SDK | `pip install dynamixel-sdk` |
-| matplotlib, numpy | `pip install matplotlib numpy` |
+| matplotlib, numpy, scipy | included with ROS |
+| scikit-learn | `sudo apt install python3-sklearn` (required for `foam_ml`) |
 | OptiTrack / Motive | Required for live data collection; optional for replay |
 
 ---
@@ -85,7 +98,9 @@ source install/setup.bash
 Build a single package (faster during development):
 
 ```bash
+colcon build --packages-select actuator_interfaces   # rebuild first if services changed
 colcon build --packages-select actuator
+colcon build --packages-select foam_ml
 colcon build --packages-select foam_viz
 ```
 
@@ -134,6 +149,28 @@ ros2 run foam_viz trajectory_replayer --file move_N_90 --no-anim
 ros2 run foam_viz trajectory_replayer --file move_N_90 --speed 3.0
 ```
 
+### 5 — Train the ML model and plan trajectories
+
+```bash
+# Train (or retrain after collecting new data)
+ros2 run foam_ml train_model
+
+# Option 1: hemisphere dome — click waypoints on the workspace
+ros2 run foam_ml option1_dome
+
+# Option 2: enter a target coordinate (East, North in mm)
+ros2 run foam_ml option2_coordinate
+
+# Option 3: draw a free-hand path on a top-down grid
+ros2 run foam_ml option3_path_draw
+
+# Compare a predicted trajectory against the recorded real one
+ros2 run foam_viz compare_trajectories --predicted <predicted_csv> --real <real_csv>
+```
+
+All three option scripts accept `--dry-run` to preview predictions without
+moving the hardware.
+
 ---
 
 ## Coordinate frame
@@ -158,4 +195,5 @@ commanding `/move_foam E` produces a positive NatNet-X displacement.
 |---|---|---|---|
 | `actuator` | ament_python | Motor control, OptiTrack, data logging | [actuator/README.md](actuator/README.md) |
 | `actuator_interfaces` | ament_cmake | Custom service message definitions | — |
-| `foam_viz` | ament_python | Trajectory replay and 2D/3D visualisation | [foam_viz/README.md](foam_viz/README.md) |
+| `foam_ml` | ament_python | ML models, trajectory planning, interactive GUIs | [foam_ml/README.md](foam_ml/README.md) |
+| `foam_viz` | ament_python | Trajectory replay and comparison visualisation | [foam_viz/README.md](foam_viz/README.md) |

@@ -193,6 +193,41 @@ ros2 service call /set_home std_srvs/srv/Trigger {}
 
 ---
 
+#### `/execute_motor_trajectory` — `actuator_interfaces/srv/ExecuteMotorTrajectory`
+
+Execute a sequence of motor position waypoints supplied by an external node
+(typically `foam_ml`).  All four waypoint arrays must be the same length.
+For each waypoint the node computes the absolute hardware position
+(`home + relative`), writes goals to all four motors simultaneously, waits
+until they arrive, then advances to the next waypoint.  OptiTrack data is
+collected continuously across the entire trajectory.
+
+| Request field | Type | Description |
+|---|---|---|
+| `motor_1_waypoints` … `motor_4_waypoints` | `int32[]` | Positions in pulses relative to home |
+| `step_delay` | float32 | Seconds to pause after each waypoint arrives |
+| `label` | string | Label prefix for the output CSV filename |
+
+| Response field | Type | Description |
+|---|---|---|
+| `success` | bool | Whether all waypoints were reached without error |
+| `message` | string | Human-readable summary |
+| `data_file` | string | Absolute path to the collected OptiTrack CSV (empty if no OptiTrack) |
+
+This service is called automatically by the `foam_ml` option scripts.  You
+can also call it manually for testing:
+
+```bash
+# Move motor 1 to +100 pulses from home, all others stay at home (0)
+ros2 service call /execute_motor_trajectory \
+  actuator_interfaces/srv/ExecuteMotorTrajectory \
+  "{motor_1_waypoints: [100], motor_2_waypoints: [0],
+    motor_3_waypoints: [0],   motor_4_waypoints: [0],
+    step_delay: 0.5, label: 'test'}"
+```
+
+---
+
 #### `/optitrack_status` — `std_srvs/srv/Trigger`
 
 Report OptiTrack connection status and the most recently received rigid-body

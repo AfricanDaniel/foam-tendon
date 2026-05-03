@@ -1,0 +1,15 @@
+# Waypoints for each motor in pulses relative to home.
+# All four arrays must have the same length (N waypoints).
+int32[] motor_1_waypoints
+int32[] motor_2_waypoints
+int32[] motor_3_waypoints
+int32[] motor_4_waypoints
+# Seconds to wait after each waypoint before moving to the next
+float32 step_delay
+# Label used for the output CSV filename
+string label
+---
+bool success
+string message
+# Absolute path to the collected OptiTrack CSV (empty if collection skipped)
+string data_file
