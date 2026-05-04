@@ -130,8 +130,17 @@ def load_csv(path: str) -> dict:
     ry  = np.array(data['raw_y'])
     rz  = np.array(data['raw_z'])
 
-    # Home = first valid frame
-    home_x, home_y, home_z = rx[0], ry[0], rz[0]
+    # A row with timestamp_s < 0 is the home-reference marker written by
+    # foam_controller_node.  Use its NatNet coords as the zero reference and
+    # drop it from the data so it doesn't appear in the plots.
+    if len(t) > 1 and t[0] < 0:
+        home_x, home_y, home_z = rx[0], ry[0], rz[0]
+        t  = t[1:];  rx = rx[1:]; ry = ry[1:]; rz = rz[1:]
+        for k in ['m1', 'm2', 'm3', 'm4']:
+            data[k] = data[k][1:]
+    else:
+        # Legacy CSVs: first valid frame is home
+        home_x, home_y, home_z = rx[0], ry[0], rz[0]
 
     # NatNet → robot frame (empirically verified):
     #   NatNet X = East,  NatNet Y = North,  NatNet Z = Up
@@ -201,6 +210,8 @@ def plot_static(data: dict) -> None:
     ax3d = fig.add_subplot(2, 3, (1, 4), projection='3d')
     _colormap_line(ax3d, east, north, up, t)
     ax3d.scatter([0], [0], [0], color='lime', s=80, zorder=5, label='Home')
+    ax3d.scatter([east[0]], [north[0]], [up[0]],
+                 color='deepskyblue', marker='^', s=100, zorder=5, label='Start')
     ax3d.scatter(east[-1], north[-1], up[-1],
                  color='red', marker='*', s=120, zorder=5, label='End')
     ax3d.set_xlabel('East (mm)')
@@ -219,7 +230,8 @@ def plot_static(data: dict) -> None:
     sc = ax_top.scatter(east, north, c=t, cmap='plasma', s=6)
     ax_top.plot(east, north, color='gray', lw=0.5, alpha=0.4)
     ax_top.scatter(0, 0, color='lime', s=80, zorder=5, label='Home')
-    ax_top.scatter(east[-1], north[-1], color='red', marker='*', s=100, zorder=5)
+    ax_top.scatter(east[0], north[0], color='deepskyblue', marker='^', s=80, zorder=5, label='Start')
+    ax_top.scatter(east[-1], north[-1], color='red', marker='*', s=100, zorder=5, label='End')
     ax_top.set_xlabel('East (mm)')
     ax_top.set_ylabel('North (mm)')
     ax_top.set_title('Top-down view (E–N)')
@@ -235,6 +247,7 @@ def plot_static(data: dict) -> None:
     ax_e.scatter(east, up, c=t, cmap='plasma', s=6)
     ax_e.plot(east, up, color='gray', lw=0.5, alpha=0.4)
     ax_e.scatter(0, 0, color='lime', s=80, zorder=5)
+    ax_e.scatter(east[0], up[0], color='deepskyblue', marker='^', s=80, zorder=5)
     ax_e.scatter(east[-1], up[-1], color='red', marker='*', s=100, zorder=5)
     ax_e.set_xlabel('East (mm)')
     ax_e.set_ylabel('Up (mm)')
@@ -248,6 +261,7 @@ def plot_static(data: dict) -> None:
     ax_n.scatter(north, up, c=t, cmap='plasma', s=6)
     ax_n.plot(north, up, color='gray', lw=0.5, alpha=0.4)
     ax_n.scatter(0, 0, color='lime', s=80, zorder=5)
+    ax_n.scatter(north[0], up[0], color='deepskyblue', marker='^', s=80, zorder=5)
     ax_n.scatter(north[-1], up[-1], color='red', marker='*', s=100, zorder=5)
     ax_n.set_xlabel('North (mm)')
     ax_n.set_ylabel('Up (mm)')
@@ -311,6 +325,8 @@ def plot_animated(data: dict, speed: float = 1.0) -> None:
     ax3d = fig.add_subplot(2, 3, (1, 4), projection='3d')
     ax3d.plot(east, north, up, color='lightgray', lw=0.8, alpha=0.5)
     ax3d.scatter([0], [0], [0], color='lime', s=60, zorder=4, label='Home')
+    ax3d.scatter([east[0]], [north[0]], [up[0]],
+                 color='deepskyblue', marker='^', s=80, zorder=4, label='Start')
     trail3d, = ax3d.plot([], [], [], color='royalblue', lw=1.5)
     dot3d,   = ax3d.plot([], [], [], 'o', color='red', ms=8, zorder=5)
     ax3d.set_xlabel('East (mm)')
@@ -327,6 +343,7 @@ def plot_animated(data: dict, speed: float = 1.0) -> None:
     ax_top = fig.add_subplot(2, 3, 2)
     ax_top.plot(east, north, color='lightgray', lw=0.8, alpha=0.5)
     ax_top.scatter([0], [0], color='lime', s=60, zorder=4)
+    ax_top.scatter([east[0]], [north[0]], color='deepskyblue', marker='^', s=60, zorder=4)
     trail_top, = ax_top.plot([], [], color='royalblue', lw=1.5)
     dot_top,   = ax_top.plot([], [], 'o', color='red', ms=8, zorder=5)
     ax_top.set_xlabel('East (mm)')
@@ -342,6 +359,7 @@ def plot_animated(data: dict, speed: float = 1.0) -> None:
     ax_e = fig.add_subplot(2, 3, 3)
     ax_e.plot(east, up, color='lightgray', lw=0.8, alpha=0.5)
     ax_e.scatter([0], [0], color='lime', s=60, zorder=4)
+    ax_e.scatter([east[0]], [up[0]], color='deepskyblue', marker='^', s=60, zorder=4)
     trail_e, = ax_e.plot([], [], color='royalblue', lw=1.5)
     dot_e,   = ax_e.plot([], [], 'o', color='red', ms=8, zorder=5)
     ax_e.set_xlabel('East (mm)')
@@ -370,6 +388,7 @@ def plot_animated(data: dict, speed: float = 1.0) -> None:
     ax_n = fig.add_subplot(2, 3, 6)
     ax_n.plot(north, up, color='lightgray', lw=0.8, alpha=0.5)
     ax_n.scatter([0], [0], color='lime', s=60, zorder=4)
+    ax_n.scatter([north[0]], [up[0]], color='deepskyblue', marker='^', s=60, zorder=4)
     trail_n, = ax_n.plot([], [], color='royalblue', lw=1.5)
     dot_n,   = ax_n.plot([], [], 'o', color='red', ms=8, zorder=5)
     ax_n.set_xlabel('North (mm)')
