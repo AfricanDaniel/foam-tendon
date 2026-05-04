@@ -93,7 +93,7 @@ def _find_workspace_root() -> str:
 
 STATE_FILE_DEFAULT  = os.path.join(_find_workspace_root(), 'foam_motor_state.csv')
 DATA_COLLECTION_DIR = os.path.join(
-    _find_workspace_root(), 'src', 'actuator', 'data_collection'
+    _find_workspace_root(), 'src', 'actuator', 'data_collection', 'training_data'
 )
 CSV_FIELDS = ['motor_id', 'current_position', 'home_position']
 
@@ -482,13 +482,16 @@ class FoamControllerNode(Node):
 
     # ── Data collection ───────────────────────────────────────────────────────
 
-    def _make_csv_path(self, label: str) -> str:
+    def _make_csv_path(self, label: str, output_dir: str = '', run_num: int = 0) -> str:
         """Return a unique, systematically named path for a new collection CSV."""
-        existing = sum(1 for f in os.listdir(DATA_COLLECTION_DIR) if f.endswith('.csv'))
-        run_num  = existing + 1
+        data_dir = output_dir.strip() or DATA_COLLECTION_DIR
+        os.makedirs(data_dir, exist_ok=True)
+        if run_num <= 0:
+            existing = sum(1 for f in os.listdir(data_dir) if f.endswith('.csv'))
+            run_num  = existing + 1
         ts       = time.strftime('%Y%m%d_%H%M%S')
         filename = f'run_{run_num:04d}_{ts}_{label}.csv'
-        return os.path.join(DATA_COLLECTION_DIR, filename)
+        return os.path.join(data_dir, filename)
 
     def _collect_data(self, csv_path: str, stop_event: threading.Event) -> None:
         """
@@ -585,9 +588,9 @@ class FoamControllerNode(Node):
 
         self.get_logger().info(f'Collection saved → {csv_path}')
 
-    def _start_collection(self, label: str):
+    def _start_collection(self, label: str, output_dir: str = '', run_num: int = 0):
         """Create CSV path, spawn collection thread. Returns (stop_event, thread, csv_path)."""
-        csv_path   = self._make_csv_path(label)
+        csv_path   = self._make_csv_path(label, output_dir=output_dir, run_num=run_num)
         self.get_logger().info(f'Data collection started → {os.path.basename(csv_path)}')
         stop_event = threading.Event()
         thread     = threading.Thread(
@@ -882,8 +885,10 @@ class FoamControllerNode(Node):
             response.data_file = ''
             return response
 
-        step_delay = max(float(request.step_delay), 0.0)
-        label      = request.label.strip() or 'ml_trajectory'
+        step_delay  = max(float(request.step_delay), 0.0)
+        label       = request.label.strip() or 'ml_trajectory'
+        output_dir  = request.output_dir.strip()
+        run_num     = int(request.run_num)
 
         self.get_logger().info(
             f'ExecuteMotorTrajectory: {n} waypoints, step_delay={step_delay:.2f}s, label={label}'
@@ -891,7 +896,8 @@ class FoamControllerNode(Node):
 
         collecting = self._is_optitrack_live()
         if collecting:
-            stop_event, collector, csv_path = self._start_collection(label)
+            stop_event, collector, csv_path = self._start_collection(
+                label, output_dir=output_dir, run_num=run_num)
         else:
             self.get_logger().warn('OptiTrack not live – trajectory will execute without recording.')
             csv_path = ''

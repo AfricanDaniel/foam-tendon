@@ -39,28 +39,37 @@ except ImportError:
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 _HERE = Path(__file__).parent
-MODELS_DIR = _HERE.parent / "models"
+
+
+def _find_models_dir() -> Path:
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        return Path(get_package_share_directory('foam_ml')) / 'models'
+    except Exception:
+        return _HERE.parent / 'models'
+
+
+MODELS_DIR = _find_models_dir()
 
 
 def _find_data_dir() -> Path:
     path = _HERE
     for _ in range(10):
-        candidate = path / "src" / "actuator" / "data_collection"
+        candidate = path / "src" / "actuator" / "data_collection" / "training_data"
         if candidate.is_dir():
             return candidate
-        candidate2 = path / "actuator" / "data_collection"
+        candidate2 = path / "actuator" / "data_collection" / "training_data"
         if candidate2.is_dir():
             return candidate2
         parent = path.parent
         if parent == path:
             break
         path = parent
-    # Fallback relative to this file: ../../actuator/data_collection
-    fallback = _HERE.parent.parent / "actuator" / "data_collection"
+    fallback = _HERE.parent.parent / "actuator" / "data_collection" / "training_data"
     if fallback.is_dir():
         return fallback
     raise FileNotFoundError(
-        f"Cannot find data_collection directory. Searched from {_HERE}"
+        f"Cannot find training_data directory. Searched from {_HERE}"
     )
 
 

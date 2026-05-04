@@ -125,6 +125,7 @@ def main():
     pred_csv_path  = [None]
     real_csv_path  = [None]
     predicted      = [None]   # (motor_seq, xyz_seq)
+    pred_run_num   = [0]
 
     # ── Figure ────────────────────────────────────────────────────────────────
     fig = plt.figure(figsize=(15, 8))
@@ -292,8 +293,9 @@ def main():
         pred_eu.set_data(xyz_seq[:, 0] * 1000, xyz_seq[:, 2] * 1000)
         pred_nu.set_data(xyz_seq[:, 1] * 1000, xyz_seq[:, 2] * 1000)
 
-        path = save_predicted_trajectory(motor_seq, xyz_seq, label="path_predicted")
+        path, rn = save_predicted_trajectory(motor_seq, xyz_seq, label="path_predicted")
         pred_csv_path[0] = path
+        pred_run_num[0]  = rn
         info_text.set_text(
             f"Predicted: {len(xyz_seq)} steps across {n_wpoints} waypoints.\n"
             f"CSV: {os.path.basename(path)}"
@@ -313,7 +315,7 @@ def main():
         info_text.set_text("Executing on hardware...")
         fig.canvas.draw_idle()
         plt.pause(0.1)
-        real_path = execute_on_hardware(motor_seq, step_delay=0.3, label="path_real")
+        real_path = execute_on_hardware(motor_seq, step_delay=0.3, label="path_real", run_num=pred_run_num[0])
         real_csv_path[0] = real_path
         if real_path:
             info_text.set_text(

@@ -21,8 +21,18 @@ from typing import Optional
 
 import numpy as np
 
-_HERE      = Path(__file__).parent
-MODELS_DIR = _HERE.parent / "models"
+_HERE = Path(__file__).parent
+
+
+def _find_models_dir() -> Path:
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        return Path(get_package_share_directory('foam_ml')) / 'models'
+    except Exception:
+        return _HERE.parent / 'models'
+
+
+MODELS_DIR = _find_models_dir()
 
 _REQUIRED_FILES = [
     "forward_model.pkl",
@@ -157,8 +167,8 @@ def _find_data_dir() -> Path:
     path = _HERE
     for _ in range(10):
         for candidate in [
-            path / "src" / "actuator" / "data_collection",
-            path / "actuator" / "data_collection",
+            path / "src" / "actuator" / "data_collection" / "training_data",
+            path / "actuator" / "data_collection" / "training_data",
         ]:
             if candidate.is_dir():
                 return candidate
@@ -166,10 +176,16 @@ def _find_data_dir() -> Path:
         if parent == path:
             break
         path = parent
-    fallback = _HERE.parent.parent / "actuator" / "data_collection"
+    fallback = _HERE.parent.parent / "actuator" / "data_collection" / "training_data"
     if fallback.is_dir():
         return fallback
-    raise FileNotFoundError("Cannot find data_collection directory.")
+    raise FileNotFoundError("Cannot find training_data directory.")
+
+
+def _find_ml_data_dir() -> Path:
+    d = _find_data_dir() / "ml_runs"
+    d.mkdir(exist_ok=True)
+    return d
 
 
 _CSV_FIELDS = [
@@ -186,16 +202,16 @@ def save_predicted_trajectory(
     xyz_pred_seq: np.ndarray,
     label: str = "predicted",
     duration_s: float = 5.0,
-) -> str:
+) -> tuple:
     """
-    Save a predicted trajectory in the same CSV format as data_collection files.
-    Returns the path to the saved file.
+    Save a predicted trajectory to data_collection/ml_runs/.
+    Returns (csv_path, run_num) so callers can pass run_num to execute_on_hardware.
     """
-    data_dir = _find_data_dir()
+    data_dir = _find_ml_data_dir()
     existing = sum(1 for f in os.listdir(data_dir) if f.endswith(".csv"))
     run_num  = existing + 1
     ts       = time.strftime("%Y%m%d_%H%M%S")
-    filename = f"predicted_{run_num:04d}_{ts}_{label}.csv"
+    filename = f"run_{run_num:04d}_{ts}_{label}.csv"
     path     = str(data_dir / filename)
 
     N       = len(motor_seq)
@@ -233,7 +249,7 @@ def save_predicted_trajectory(
             })
 
     print(f"Predicted trajectory saved → {filename}")
-    return path
+    return path, run_num
 
 
 # ── ROS2 hardware execution ───────────────────────────────────────────────────
@@ -242,6 +258,7 @@ def execute_on_hardware(
     motor_waypoints_rel: np.ndarray,
     step_delay: float = 0.5,
     label: str = "ml_trajectory",
+    run_num: int = 0,
 ) -> str:
     """
     Send motor waypoints to the running foam_controller_node via the
@@ -250,6 +267,8 @@ def execute_on_hardware(
     motor_waypoints_rel : (N, 4) int – pulses relative to home
     step_delay          : seconds between waypoints
     label               : used for the output CSV filename
+    run_num             : if > 0, forces this run number so the real CSV
+                          is paired with the predicted CSV from save_predicted_trajectory
 
     Returns the path to the collected real trajectory CSV, or '' if ROS2
     is unavailable or the service call fails.
@@ -283,6 +302,8 @@ def execute_on_hardware(
     req.motor_4_waypoints = [int(waypoints[i, 3]) for i in range(N)]
     req.step_delay        = float(step_delay)
     req.label             = label
+    req.output_dir        = str(_find_ml_data_dir())
+    req.run_num           = int(run_num)
 
     print(f"Sending {N} waypoints to hardware (step_delay={step_delay:.2f}s)...")
     future = client.call_async(req)

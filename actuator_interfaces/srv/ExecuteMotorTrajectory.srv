@@ -8,6 +8,10 @@ int32[] motor_4_waypoints
 float32 step_delay
 # Label used for the output CSV filename
 string label
+# If non-empty, save the CSV here instead of the default data_collection dir
+string output_dir
+# If > 0, use this run number in the filename instead of auto-counting
+int32 run_num
 ---
 bool success
 string message

@@ -90,6 +90,7 @@ def main():
     pred_csv_path = [None]
     real_csv_path = [None]
     predicted_path = [None]
+    pred_run_num   = [0]
 
     # ── Figure ────────────────────────────────────────────────────────────────
     fig = plt.figure(figsize=(14, 8))
@@ -210,8 +211,9 @@ def main():
         pred_3d.set_3d_properties(xyz_seq[:, 2] * 1000)
         target_dot.set_data([xyz_seq[-1, 0] * 1000], [xyz_seq[-1, 1] * 1000])
 
-        path = save_predicted_trajectory(motor_seq, xyz_seq, label="coord_predicted")
+        path, rn = save_predicted_trajectory(motor_seq, xyz_seq, label="coord_predicted")
         pred_csv_path[0] = path
+        pred_run_num[0]  = rn
 
         # Show predicted endpoint
         ep = xyz_seq[-1]
@@ -234,7 +236,7 @@ def main():
         info_text.set_text("Executing on hardware...")
         fig.canvas.draw_idle()
         plt.pause(0.1)
-        real_path = execute_on_hardware(motor_seq, step_delay=0.3, label="coord_real")
+        real_path = execute_on_hardware(motor_seq, step_delay=0.3, label="coord_real", run_num=pred_run_num[0])
         real_csv_path[0] = real_path
         if real_path:
             info_text.set_text(

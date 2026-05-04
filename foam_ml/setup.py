@@ -1,3 +1,5 @@
+import glob
+import os
 from setuptools import find_packages, setup
 
 package_name = 'foam_ml'
@@ -10,6 +12,8 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/models',
+            [f for f in glob.glob('models/*') if os.path.isfile(f)]),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

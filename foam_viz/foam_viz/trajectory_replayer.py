@@ -68,20 +68,31 @@ DATA_DIR = _find_data_dir()
 def _resolve_path(name: str) -> str:
     if os.path.isabs(name) and os.path.isfile(name):
         return name
-    direct = os.path.join(DATA_DIR, name)
-    if os.path.isfile(direct):
-        return direct
-    # Try prefix match in data_collection/
-    if os.path.isdir(DATA_DIR):
-        matches = [f for f in sorted(os.listdir(DATA_DIR)) if name in f and f.endswith('.csv')]
-        if len(matches) == 1:
-            return os.path.join(DATA_DIR, matches[0])
-        if len(matches) > 1:
-            print(f'Ambiguous match for "{name}":')
-            for m in matches:
-                print(f'  {m}')
-            sys.exit(1)
-    print(f'File not found: "{name}"\nSearched in: {DATA_DIR}')
+    # Search data_collection/ and its known subdirectories
+    search_dirs = [
+        DATA_DIR,
+        os.path.join(DATA_DIR, 'training_data'),
+        os.path.join(DATA_DIR, 'ml_runs'),
+    ]
+    for d in search_dirs:
+        direct = os.path.join(d, name)
+        if os.path.isfile(direct):
+            return direct
+    # Try substring match across all search dirs
+    all_matches = []
+    for d in search_dirs:
+        if os.path.isdir(d):
+            for f in sorted(os.listdir(d)):
+                if name in f and f.endswith('.csv'):
+                    all_matches.append(os.path.join(d, f))
+    if len(all_matches) == 1:
+        return all_matches[0]
+    if len(all_matches) > 1:
+        print(f'Ambiguous match for "{name}":')
+        for m in all_matches:
+            print(f'  {m}')
+        sys.exit(1)
+    print(f'File not found: "{name}"\nSearched in: {", ".join(search_dirs)}')
     sys.exit(1)
 
 

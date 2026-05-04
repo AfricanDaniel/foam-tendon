@@ -114,6 +114,7 @@ def main():
     predicted_path = [None]    # [xyz_seq or None]
     real_csv_path  = [None]    # [str or None]
     pred_csv_path  = [None]
+    pred_run_num   = [0]       # shared run number for predicted+real pair
 
     # ── Figure setup ──────────────────────────────────────────────────────────
     fig = plt.figure(figsize=(15, 8))
@@ -257,8 +258,9 @@ def main():
         pred_3d.set_3d_properties(xyz_seq[:, 2] * 1000)
 
         # Save predicted CSV
-        path = save_predicted_trajectory(motor_seq, xyz_seq, label="dome_predicted")
+        path, rn = save_predicted_trajectory(motor_seq, xyz_seq, label="dome_predicted")
         pred_csv_path[0] = path
+        pred_run_num[0]  = rn
         info_text.set_text(f"Predicted trajectory shown.  CSV: {os.path.basename(path)}\n"
                            "Click Execute to run on hardware, or Compare (after executing) to compare.")
         fig.canvas.draw_idle()
@@ -285,7 +287,9 @@ def main():
         motor_seq, xyz_seq = generate_predicted_trajectory(xyz_wps, n_interp_steps=50)
 
         if pred_csv_path[0] is None:
-            pred_csv_path[0] = save_predicted_trajectory(motor_seq, xyz_seq, "dome_predicted")
+            path, rn = save_predicted_trajectory(motor_seq, xyz_seq, "dome_predicted")
+            pred_csv_path[0] = path
+            pred_run_num[0]  = rn
 
         if dry_run:
             info_text.set_text("Dry-run: hardware execution skipped.")
@@ -296,7 +300,7 @@ def main():
         fig.canvas.draw_idle()
         plt.pause(0.1)
 
-        real_path = execute_on_hardware(motor_seq, step_delay=0.3, label="dome_real")
+        real_path = execute_on_hardware(motor_seq, step_delay=0.3, label="dome_real", run_num=pred_run_num[0])
         real_csv_path[0] = real_path
 
         if real_path:
