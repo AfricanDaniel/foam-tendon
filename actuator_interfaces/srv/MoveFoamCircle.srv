@@ -6,6 +6,8 @@ int32 steps
 float32 step_delay
 # True = clockwise when viewed from above, False = counter-clockwise
 bool clockwise
+# Optional CSV label override (empty = auto-generate)
+string label
 ---
 bool success
 string message

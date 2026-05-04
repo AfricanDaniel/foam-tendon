@@ -12,6 +12,7 @@ Edit the Parameters section below to change amplitudes, safety limits, etc.
 Run a dry run first to preview the full sequence before any hardware moves.
 """
 
+import math
 import sys
 import time
 
@@ -29,32 +30,35 @@ from actuator_interfaces.srv import MoveFoam, MoveFoamCircle, MoveFoamSquare
 # ── Safety ────────────────────────────────────────────────────────────────────
 # Hard cap (degrees) applied to every single /move_foam call.
 # Reduce this first if the foam bends too far during single-step moves.
-MAX_DEGREES = 380.0 #150.0
+MAX_DEGREES = 400.0 #150.0
 
 # Maximum amplitude (degrees) used inside multi-step combo sequences.
 # With two orthogonal steps at COMBO_AMPLITUDE, max displacement from home
 # is ≈ √2 × COMBO_AMPLITUDE ≈ 99° at default — comparable to a single 100°
 # move.  Lower this before MAX_DEGREES when combos over-bend the foam.
-COMBO_AMPLITUDE = 70.0
+COMBO_AMPLITUDE = 100.0
 
 # ── Single-direction sweeps ───────────────────────────────────────────────────
 # The script moves each of the 8 cardinal/diagonal directions at every
 # amplitude listed here, returning home after each move.
 # Values above MAX_DEGREES are automatically clamped.
-AMPLITUDES = [60.0, 100.0, 140.0]
+AMPLITUDES = [60.0, 100.0, 140.0, 180.0, 220.0, 260.0, 300.0, 340.0, 380.0]
 
 # ── Circles ───────────────────────────────────────────────────────────────────
-CIRCLE_RADII = [50.0, 80.0, 110.0]   # degrees of string travel; clamped to MAX_DEGREES
+CIRCLE_RADII = [50.0, 80.0, 110.0, 140.0, 170.0]   # degrees of string travel; clamped to MAX_DEGREES
 CIRCLE_STEPS = 36                     # discrete steps per full revolution
 CIRCLE_STEP_DELAY = 0.2              # seconds to pause between steps
 
 # ── Squares ───────────────────────────────────────────────────────────────────
-SQUARE_SIDES = [60.0, 90.0, 120.0]  # degrees; clamped to MAX_DEGREES
+SQUARE_SIDES = [60.0, 90.0, 120.0, 150.0, 180.0]  # degrees; clamped to MAX_DEGREES
 SQUARE_STEP_DELAY = 0.5              # seconds to pause between sides
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 HOME_WAIT = 1.5      # seconds to pause after each /go_home before the next move
-MOVE_TIMEOUT = 30.0  # ROS service call timeout (seconds)
+MOVE_TIMEOUT = 30.0  # ROS service call timeout for simple moves (seconds)
+
+# Motor speed in deg/s: DEFAULT_VELOCITY=20 × 0.229 RPM/unit × 6 deg/RPM-unit
+_MOTOR_DEGS_PER_SEC = 20 * 0.229 * 6.0
 
 # ── Run control ───────────────────────────────────────────────────────────────
 # Set to True to print the full command sequence without moving any hardware.
@@ -128,7 +132,7 @@ class TrainingDataCollector(Node):
                 return False
         return True
 
-    def _call(self, client, request, label: str) -> bool:
+    def _call(self, client, request, label: str, timeout: float = MOVE_TIMEOUT) -> bool:
         self._move_num += 1
         prefix = f'[{self._move_num:4d}]'
 
@@ -137,7 +141,7 @@ class TrainingDataCollector(Node):
             return True
 
         future = client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=MOVE_TIMEOUT)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=timeout)
         self._n_calls += 1
 
         if future.result() is None:
@@ -172,26 +176,35 @@ class TrainingDataCollector(Node):
             f'move_foam  dir={direction:3s}  deg={deg:.1f}'
         )
 
-    def circle(self, radius: float, clockwise: bool) -> bool:
+    def circle(self, radius: float, clockwise: bool, label: str = '') -> bool:
         r = min(radius, MAX_DEGREES)
         req = MoveFoamCircle.Request()
         req.radius     = float(r)
         req.steps      = CIRCLE_STEPS
         req.step_delay = float(CIRCLE_STEP_DELAY)
         req.clockwise  = clockwise
+        req.label      = label
+        step_deg = r * 2.0 * math.sin(math.pi / CIRCLE_STEPS)
+        circle_timeout = max(MOVE_TIMEOUT,
+            CIRCLE_STEPS * (step_deg / _MOTOR_DEGS_PER_SEC + CIRCLE_STEP_DELAY) * 1.5 + 10.0)
         return self._call(
             self._cli_circle, req,
-            f'circle     r={r:.1f}  {"CW " if clockwise else "CCW"}  steps={CIRCLE_STEPS}'
+            f'circle     r={r:.1f}  {"CW " if clockwise else "CCW"}  steps={CIRCLE_STEPS}',
+            circle_timeout,
         )
 
-    def square(self, side: float) -> bool:
+    def square(self, side: float, label: str = '') -> bool:
         s = min(side, MAX_DEGREES)
         req = MoveFoamSquare.Request()
         req.side_length = float(s)
         req.step_delay  = float(SQUARE_STEP_DELAY)
+        req.label       = label
+        square_timeout = max(MOVE_TIMEOUT,
+            4.0 * (s / _MOTOR_DEGS_PER_SEC + SQUARE_STEP_DELAY) * 1.5 + 10.0)
         return self._call(
             self._cli_square, req,
-            f'square     side={s:.1f}'
+            f'square     side={s:.1f}',
+            square_timeout,
         )
 
     # ── Sequence ───────────────────────────────────────────────────────────────
@@ -264,18 +277,48 @@ class TrainingDataCollector(Node):
                 self.move(fwd, half)
                 self.go_home()
 
-        # ── Phase 5: Circles ─────────────────────────────────────────────────
-        # Full circles in both directions at each radius.
-        self.get_logger().info('\n--- Phase 5: Circles ---')
+        # ── Phase 5: Circles (edge-start) ────────────────────────────────────
+        # Foam starts at home; the circle path has home on its edge.
+        self.get_logger().info('\n--- Phase 5: Circles (edge-start) ---')
         for radius in CIRCLE_RADII:
             for clockwise in [False, True]:
-                self.circle(radius, clockwise)
+                d = 'cw' if clockwise else 'ccw'
+                self.circle(radius, clockwise,
+                    label=f'circle_edge_r{min(radius, MAX_DEGREES):.1f}_s{CIRCLE_STEPS}_{d}')
                 self.go_home()
 
-        # ── Phase 6: Squares ─────────────────────────────────────────────────
-        self.get_logger().info('\n--- Phase 6: Squares ---')
+        # ── Phase 6: Squares (corner-start) ──────────────────────────────────
+        # Foam starts at home; home is the SW corner of the square.
+        self.get_logger().info('\n--- Phase 6: Squares (corner-start) ---')
         for side in SQUARE_SIDES:
-            self.square(side)
+            self.square(side,
+                label=f'square_corner_side{min(side, MAX_DEGREES):.1f}')
+            self.go_home()
+
+        # ── Phase 7: Centered circles ─────────────────────────────────────────
+        # Shift North by radius so home (0,0) is the center of the circle.
+        # The circle parameterisation traces x=r·sin(θ), y=r·(cos(θ)−1) from
+        # the start point, so the centre sits at (0, −radius) relative to
+        # start.  Starting at (0, +radius) puts that centre exactly at home.
+        self.get_logger().info('\n--- Phase 7: Centered circles ---')
+        for radius in CIRCLE_RADII:
+            for clockwise in [False, True]:
+                d = 'cw' if clockwise else 'ccw'
+                self.move('N', radius)
+                self.circle(radius, clockwise,
+                    label=f'circle_centered_r{min(radius, MAX_DEGREES):.1f}_s{CIRCLE_STEPS}_{d}')
+                self.go_home()
+
+        # ── Phase 8: Centered squares ─────────────────────────────────────────
+        # Shift to the SW corner (West side/2, South side/2) so the square
+        # N→E→S→W path is centred on home (0,0).
+        self.get_logger().info('\n--- Phase 8: Centered squares ---')
+        for side in SQUARE_SIDES:
+            half = side / 2.0
+            self.move('W', half)
+            self.move('S', half)
+            self.square(side,
+                label=f'square_centered_side{min(side, MAX_DEGREES):.1f}')
             self.go_home()
 
     def _count_groups(self) -> int:
@@ -285,7 +328,9 @@ class TrainingDataCollector(Node):
         phase4 = len([('N','S'), ('E','W'), ('NE','SW'), ('NW','SE')]) * len(AMPLITUDES[:2]) * 2
         phase5 = len(CIRCLE_RADII) * 2
         phase6 = len(SQUARE_SIDES)
-        return phase1 + phase2 + phase3 + phase4 + phase5 + phase6
+        phase7 = len(CIRCLE_RADII) * 2
+        phase8 = len(SQUARE_SIDES)
+        return phase1 + phase2 + phase3 + phase4 + phase5 + phase6 + phase7 + phase8
 
 
 def main(args=None) -> None:

@@ -100,7 +100,7 @@ CSV_FIELDS = ['motor_id', 'current_position', 'home_position']
 
 class FoamControllerNode(Node):
     """
-    Controls a foam cube suspended by four Dynamixel motors via string spools.
+    Controls a foam cylinder suspended by four Dynamixel motors via string spools.
 
     Pull / release conventions
     --------------------------
@@ -109,8 +109,9 @@ class FoamControllerNode(Node):
     ID 3 (South): CCW → pull,    CW  → release
     ID 4 (West):  CCW → pull,    CW  → release
 
-    All four motors share one serial bus and are commanded simultaneously
-    via GroupSyncWrite so pull and release motors move in the same packet.
+    All four motors share one serial bus.  Commands are sent sequentially
+    via write4ByteTxRx (~1 ms per motor at 1 Mbps), so all four are
+    dispatched within ~4 ms — negligible relative to motor travel time.
 
     Motor-command formula
     ---------------------
@@ -165,6 +166,7 @@ class FoamControllerNode(Node):
         self._optitrack_available = False
         self._optitrack_pos = None        # list [x, y, z]
         self._optitrack_rot = None        # list [qx, qy, qz, qw]
+        self._optitrack_home_natnet = None  # NatNet [x,y,z] captured when at home
         self._optitrack_lock = threading.Lock()
         self._last_optitrack_time = 0.0
         self._optitrack_frame_count = 0   # total NatNet frames received
@@ -507,9 +509,29 @@ class FoamControllerNode(Node):
         interval = 1.0 / COLLECT_HZ
         t0 = time.time()
 
+        with self._optitrack_lock:
+            home_nat = list(self._optitrack_home_natnet) if self._optitrack_home_natnet else None
+
         with open(csv_path, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=fields)
             writer.writeheader()
+
+            # Row with timestamp < 0 is a home-reference marker for the replayer.
+            # It records the NatNet position at home so the replayer can correctly
+            # zero any CSV that starts at a shifted position (e.g. centred circles).
+            if home_nat is not None:
+                writer.writerow({
+                    'timestamp_s':  '-1.0',
+                    'motor_1_pos':  '0', 'motor_2_pos': '0',
+                    'motor_3_pos':  '0', 'motor_4_pos': '0',
+                    'motor_1_vel':  '',  'motor_2_vel': '',
+                    'motor_3_vel':  '',  'motor_4_vel': '',
+                    'optitrack_x':  f'{home_nat[0]:.6f}',
+                    'optitrack_y':  f'{home_nat[1]:.6f}',
+                    'optitrack_z':  f'{home_nat[2]:.6f}',
+                    'optitrack_qx': '', 'optitrack_qy': '',
+                    'optitrack_qz': '', 'optitrack_qw': '',
+                })
 
             while not stop_event.is_set():
                 row: dict = {'timestamp_s': f'{time.time() - t0:.4f}'}
@@ -535,6 +557,10 @@ class FoamControllerNode(Node):
                 with self._optitrack_lock:
                     p = list(self._optitrack_pos) if self._optitrack_pos is not None else None
                     r = list(self._optitrack_rot) if self._optitrack_rot is not None else None
+                    last_t = self._last_optitrack_time
+
+                if last_t > 0 and (time.time() - last_t) > OPTITRACK_TIMEOUT:
+                    p = r = None
 
                 if p is not None:
                     row['optitrack_x'] = f'{p[0]:.6f}'
@@ -609,6 +635,10 @@ class FoamControllerNode(Node):
             self.current_positions[mid] = self.home_positions[mid]
         self._save_state()
 
+        with self._optitrack_lock:
+            if self._optitrack_pos is not None:
+                self._optitrack_home_natnet = list(self._optitrack_pos)
+
         response.success = True
         response.message = (
             'Home reached. '
@@ -629,6 +659,9 @@ class FoamControllerNode(Node):
                 pos = self.current_positions[mid]
             self.home_positions[mid]    = pos
             self.current_positions[mid] = pos
+        with self._optitrack_lock:
+            if self._optitrack_pos is not None:
+                self._optitrack_home_natnet = list(self._optitrack_pos)
         self._save_state()
         response.success = True
         response.message = (
@@ -709,7 +742,7 @@ class FoamControllerNode(Node):
 
         collecting = self._is_optitrack_live()
         if collecting:
-            label = f'circle_r{radius:.1f}_s{steps}_{"cw" if clockwise else "ccw"}'
+            label = request.label.strip() or f'circle_r{radius:.1f}_s{steps}_{"cw" if clockwise else "ccw"}'
             stop_event, collector = self._start_collection(label)
         else:
             self.get_logger().warn('OptiTrack not connected – skipping data collection.')
@@ -777,7 +810,7 @@ class FoamControllerNode(Node):
 
         collecting = self._is_optitrack_live()
         if collecting:
-            csv_label = f'square_side{side:.1f}'
+            csv_label = request.label.strip() or f'square_side{side:.1f}'
             stop_event, collector = self._start_collection(csv_label)
         else:
             self.get_logger().warn('OptiTrack not connected – skipping data collection.')

@@ -2,6 +2,8 @@
 float32 side_length
 # Pause between each side in seconds (0.0 = no pause)
 float32 step_delay
+# Optional CSV label override (empty = auto-generate)
+string label
 ---
 bool success
 string message
