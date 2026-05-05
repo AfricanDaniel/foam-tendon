@@ -42,11 +42,20 @@ _HERE = Path(__file__).parent
 
 
 def _find_models_dir() -> Path:
-    try:
-        from ament_index_python.packages import get_package_share_directory
-        return Path(get_package_share_directory('foam_ml')) / 'models'
-    except Exception:
-        return _HERE.parent / 'models'
+    # Always save to the source tree so colcon build picks them up.
+    # Walk up from __file__ until we find the workspace root (has both src/ and install/).
+    path = Path(__file__).resolve().parent
+    for _ in range(15):
+        if (path / 'src').is_dir() and (path / 'install').is_dir():
+            candidate = path / 'src' / 'foam_ml' / 'models'
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+        parent = path.parent
+        if parent == path:
+            break
+        path = parent
+    # Fallback: running directly from source checkout
+    return (_HERE.parent / 'models').resolve()
 
 
 MODELS_DIR = _find_models_dir()
