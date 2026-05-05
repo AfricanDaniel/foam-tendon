@@ -159,8 +159,9 @@ def main():
     ax_3d.set_xlabel("East (mm)")
     ax_3d.set_ylabel("North (mm)")
     ax_3d.set_zlabel("Up (mm)")
-    # Training scatter
-    ax_3d.scatter(east_d * 1000, north_d * 1000, up_d * 1000,
+    # Training scatter — projected onto dome surface
+    dome_z_train = np.sqrt(np.maximum(0.0, max_r**2 - east_d**2 - north_d**2)) * 1000
+    ax_3d.scatter(east_d * 1000, north_d * 1000, dome_z_train,
                   s=1, c="lightgray", alpha=0.3, zorder=1)
     # Hemisphere wireframe at max reach
     HX, HY, HZ = _make_hemisphere_mesh(max_r * 1000)
@@ -170,7 +171,6 @@ def main():
     ax_3d.plot(max_r_p95 * 1000 * np.cos(ang),
                max_r_p95 * 1000 * np.sin(ang),
                np.zeros(200), "--", color="orange", lw=1.5, alpha=0.8)
-    ax_3d.scatter([0], [0], [max_r * 1000], c="lime", s=80, zorder=5)  # home at dome apex
     def _dome_z(e_m, n_m):
         """Project (east, north) in metres onto the dome surface, returning display Z in mm."""
         return float(np.sqrt(max(0.0, max_r**2 - e_m**2 - n_m**2))) * 1000.0
@@ -180,8 +180,8 @@ def main():
     ax_3d.set_ylim(-lim, lim)
     ax_3d.set_zlim(-lim * 0.1, lim)
 
-    wp_3d,      = ax_3d.plot([], [], [], "o", color="royalblue", ms=8, zorder=6)
-    pred_3d,    = ax_3d.plot([], [], [], "-", color="darkorange", lw=2, zorder=5)
+    wp_3d,   = ax_3d.plot([], [], [], "o", color="royalblue", ms=8, zorder=6)
+    pred_3d, = ax_3d.plot([], [], [], "-", color="darkorange", lw=2, zorder=5)
 
     # ── Bottom info text ───────────────────────────────────────────────────────
     ax_info = fig.add_axes([0.05, 0.03, 0.5, 0.08])
