@@ -45,13 +45,19 @@ COMBO_AMPLITUDE = 100.0
 AMPLITUDES = [60.0, 100.0, 140.0, 180.0, 220.0, 260.0, 300.0, 340.0, 380.0]
 
 # ── Circles ───────────────────────────────────────────────────────────────────
-CIRCLE_RADII = [50.0, 80.0, 110.0, 140.0, 170.0]   # degrees of string travel; clamped to MAX_DEGREES
+CIRCLE_RADII = [50.0, 80.0, 110.0, 140.0, 170.0,
+                200.0, 250.0, 300.0, 350.0]  # degrees of string travel; clamped to MAX_DEGREES
 CIRCLE_STEPS = 36                     # discrete steps per full revolution
 CIRCLE_STEP_DELAY = 0.2              # seconds to pause between steps
 
 # ── Squares ───────────────────────────────────────────────────────────────────
-SQUARE_SIDES = [60.0, 90.0, 120.0, 150.0, 180.0]  # degrees; clamped to MAX_DEGREES
+SQUARE_SIDES = [60.0, 90.0, 120.0, 150.0, 180.0,
+                210.0, 270.0, 330.0]  # degrees; clamped to MAX_DEGREES
 SQUARE_STEP_DELAY = 0.5              # seconds to pause between sides
+
+# ── Large-amplitude combos (phases 9–10) ─────────────────────────────────────
+# Extra amplitudes for two-step combos to sample the mid/outer dome.
+LARGE_COMBO_AMPLITUDES = [150.0, 200.0, 250.0, 300.0]
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 HOME_WAIT = 1.5      # seconds to pause after each /go_home before the next move
@@ -96,6 +102,37 @@ _TRIPLE_COMBOS = [
     ('E',  'S',  'W'),
     ('NE', 'SE', 'SW'),
     ('NW', 'SW', 'SE'),
+]
+
+# Asymmetric two-step combos: (dir_A, amp_A, dir_B, amp_B).
+# Using unequal amplitudes reaches intermediate angles (e.g. NNE, ENE) that
+# the uniform-amplitude combos and single-direction sweeps never hit.
+_ASYM_COMBOS = [
+    # NNE region — far N, small E
+    ('N', 200.0, 'E', 100.0), ('N', 300.0, 'E', 100.0),
+    # ENE region — far E, small N
+    ('E', 200.0, 'N', 100.0), ('E', 300.0, 'N', 100.0),
+    # ESE region — far E, small S
+    ('E', 200.0, 'S', 100.0), ('E', 300.0, 'S', 100.0),
+    # SSE region — far S, small E
+    ('S', 200.0, 'E', 100.0), ('S', 300.0, 'E', 100.0),
+    # SSW region — far S, small W
+    ('S', 200.0, 'W', 100.0), ('S', 300.0, 'W', 100.0),
+    # WSW region — far W, small S
+    ('W', 200.0, 'S', 100.0), ('W', 300.0, 'S', 100.0),
+    # WNW region — far W, small N
+    ('W', 200.0, 'N', 100.0), ('W', 300.0, 'N', 100.0),
+    # NNW region — far N, small W
+    ('N', 200.0, 'W', 100.0), ('N', 300.0, 'W', 100.0),
+    # Same pairs reversed (small primary, large secondary)
+    ('N', 100.0, 'E', 200.0), ('N', 100.0, 'E', 300.0),
+    ('E', 100.0, 'N', 200.0), ('E', 100.0, 'N', 300.0),
+    ('E', 100.0, 'S', 200.0), ('E', 100.0, 'S', 300.0),
+    ('S', 100.0, 'E', 200.0), ('S', 100.0, 'E', 300.0),
+    ('S', 100.0, 'W', 200.0), ('S', 100.0, 'W', 300.0),
+    ('W', 100.0, 'S', 200.0), ('W', 100.0, 'S', 300.0),
+    ('W', 100.0, 'N', 200.0), ('W', 100.0, 'N', 300.0),
+    ('N', 100.0, 'W', 200.0), ('N', 100.0, 'W', 300.0),
 ]
 
 
@@ -321,16 +358,37 @@ class TrainingDataCollector(Node):
                 label=f'square_centered_side{min(side, MAX_DEGREES):.1f}')
             self.go_home()
 
+        # ── Phase 9: Two-step combos at larger amplitudes ─────────────────────
+        # Same direction pairs as Phase 2 but at LARGE_COMBO_AMPLITUDES so
+        # the mid/outer dome regions are sampled.
+        self.get_logger().info('\n--- Phase 9: Two-step combos at large amplitudes ---')
+        for amp in LARGE_COMBO_AMPLITUDES:
+            for dir_a, dir_b in _COMBO_PAIRS:
+                self.move(dir_a, amp)
+                self.move(dir_b, amp)
+                self.go_home()
+
+        # ── Phase 10: Asymmetric two-step combos ──────────────────────────────
+        # Unequal amplitudes per step reach intermediate angles (NNE, ENE, …)
+        # that uniform-amplitude combos and single-direction sweeps never hit.
+        self.get_logger().info('\n--- Phase 10: Asymmetric two-step combos ---')
+        for dir_a, amp_a, dir_b, amp_b in _ASYM_COMBOS:
+            self.move(dir_a, amp_a)
+            self.move(dir_b, amp_b)
+            self.go_home()
+
     def _count_groups(self) -> int:
-        phase1 = len(DIRECTIONS) * len(AMPLITUDES)
-        phase2 = len(_COMBO_PAIRS)
-        phase3 = len(_TRIPLE_COMBOS)
-        phase4 = len([('N','S'), ('E','W'), ('NE','SW'), ('NW','SE')]) * len(AMPLITUDES[:2]) * 2
-        phase5 = len(CIRCLE_RADII) * 2
-        phase6 = len(SQUARE_SIDES)
-        phase7 = len(CIRCLE_RADII) * 2
-        phase8 = len(SQUARE_SIDES)
-        return phase1 + phase2 + phase3 + phase4 + phase5 + phase6 + phase7 + phase8
+        phase1  = len(DIRECTIONS) * len(AMPLITUDES)
+        phase2  = len(_COMBO_PAIRS)
+        phase3  = len(_TRIPLE_COMBOS)
+        phase4  = len([('N','S'), ('E','W'), ('NE','SW'), ('NW','SE')]) * len(AMPLITUDES[:2]) * 2
+        phase5  = len(CIRCLE_RADII) * 2
+        phase6  = len(SQUARE_SIDES)
+        phase7  = len(CIRCLE_RADII) * 2
+        phase8  = len(SQUARE_SIDES)
+        phase9  = len(LARGE_COMBO_AMPLITUDES) * len(_COMBO_PAIRS)
+        phase10 = len(_ASYM_COMBOS)
+        return phase1 + phase2 + phase3 + phase4 + phase5 + phase6 + phase7 + phase8 + phase9 + phase10
 
 
 def main(args=None) -> None:
