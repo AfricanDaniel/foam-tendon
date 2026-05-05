@@ -170,7 +170,11 @@ def main():
     ax_3d.plot(max_r_p95 * 1000 * np.cos(ang),
                max_r_p95 * 1000 * np.sin(ang),
                np.zeros(200), "--", color="orange", lw=1.5, alpha=0.8)
-    ax_3d.scatter([0], [0], [0], c="lime", s=80, zorder=5)
+    ax_3d.scatter([0], [0], [max_r * 1000], c="lime", s=80, zorder=5)  # home at dome apex
+    def _dome_z(e_m, n_m):
+        """Project (east, north) in metres onto the dome surface, returning display Z in mm."""
+        return float(np.sqrt(max(0.0, max_r**2 - e_m**2 - n_m**2))) * 1000.0
+
     lim = max_r * 1000 * 1.3
     ax_3d.set_xlim(-lim, lim)
     ax_3d.set_ylim(-lim, lim)
@@ -205,16 +209,10 @@ def main():
             xs = [w[0] * 1000 for w in waypoints_en]
             ys = [w[1] * 1000 for w in waypoints_en]
             wp_scatter.set_data(xs, ys)
-            # Estimate Z from forward model via inverse model round-trip
-            xyz_for_3d = []
-            for e, n in waypoints_en:
-                from model_utils import predict_motors, predict_xyz
-                m = predict_motors(np.array([e, n, 0.0]))
-                xyz = predict_xyz(m)
-                xyz_for_3d.append(xyz)
-            xyz_for_3d = np.array(xyz_for_3d)
-            wp_3d.set_data(xyz_for_3d[:, 0] * 1000, xyz_for_3d[:, 1] * 1000)
-            wp_3d.set_3d_properties(xyz_for_3d[:, 2] * 1000)
+            # Project waypoints onto dome surface for 3D display
+            zs = [_dome_z(w[0], w[1]) for w in waypoints_en]
+            wp_3d.set_data(xs, ys)
+            wp_3d.set_3d_properties(zs)
         else:
             wp_scatter.set_data([], [])
             wp_3d.set_data([], [])
@@ -252,10 +250,11 @@ def main():
         motor_seq, xyz_seq = generate_predicted_trajectory(xyz_wps, n_interp_steps=50)
         predicted_path[0] = xyz_seq
 
-        # Display
+        # Display — project path onto dome surface for 3D, flat east/north for top-down
         pred_line_2d.set_data(xyz_seq[:, 0] * 1000, xyz_seq[:, 1] * 1000)
+        dome_zs = [_dome_z(float(xyz_seq[i, 0]), float(xyz_seq[i, 1])) for i in range(len(xyz_seq))]
         pred_3d.set_data(xyz_seq[:, 0] * 1000, xyz_seq[:, 1] * 1000)
-        pred_3d.set_3d_properties(xyz_seq[:, 2] * 1000)
+        pred_3d.set_3d_properties(dome_zs)
 
         # Save predicted CSV
         path, rn = save_predicted_trajectory(motor_seq, xyz_seq, label="dome_predicted")
