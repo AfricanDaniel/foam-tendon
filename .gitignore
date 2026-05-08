@@ -3,8 +3,13 @@ __pycache__/
 *.pyo
 .idea/
 *.egg-info/
+.claude
+.ipynb_checkpoints
 build/
 install/
 log/
 actuator/data_collection
 actuator/optitrack_data
+foam_ml/ml_readme.md
+foam_ml/option1_dome_readme.md
+ml_env
