@@ -1,13 +1,25 @@
 # %%
 """
-Visualise all move_N_ trajectories from training data.
+Visualise all move_NW_ trajectories from training data.
 
 Three views:
-  1. Top-down   (East vs North)
-  2. Side view  (North vs Up)
+  1. Top-down   (North vs East)  — NW moves show negative East, positive North
+  2. Side view  (NW diagonal magnitude vs Up)
   3. 3D         (East, North, Up)
 
-Plus a motor-position panel showing how each motor changes with North displacement.
+Plus motor panels (all four active during diagonal moves):
+  4. All motors vs NW diagonal magnitude
+  5. All motors vs Up displacement
+
+NW is the negative-X, positive-Y direction in the robot frame.
+  diag_mm = sqrt(east_mm^2 + north_mm^2)  — horizontal distance from home
+
+Motor behaviour during a NW move:
+  Motor 1 (North pull):   CW  → position decreases
+  Motor 2 (East release): CCW → position increases
+  Motor 3 (South release): CW → position decreases
+  Motor 4 (West pull):    CCW → position increases
+
 All coordinates are zeroed at the first row of each file (home position).
 All units: mm for position, pulses for motor counts.
 """
@@ -18,6 +30,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
 from pathlib import Path
+from plotly.subplots import make_subplots
 
 pio.renderers.default = "browser"
 
@@ -32,14 +45,14 @@ def _find_training_data() -> Path:
     raise FileNotFoundError(f"Cannot find training_data (started from {Path.cwd()})")
 
 data_dir = _find_training_data()
-move_n_files = sorted(data_dir.glob("*move_N_*.csv"))
-print(f"Found {len(move_n_files)} move_N_ files")
+move_nw_files = sorted(data_dir.glob("*move_NW_*.csv"))
+print(f"Found {len(move_nw_files)} move_NW_ files")
 
 # ── Load and zero each trajectory at home ────────────────────────────────────
-trajectories = []   # list of dicts
+trajectories = []
 
-for f in move_n_files:
-    m = re.search(r'move_N_(\d+\.?\d*)deg', f.name)
+for f in move_nw_files:
+    m = re.search(r'move_NW_(\d+\.?\d*)deg', f.name)
     amplitude = float(m.group(1)) if m else 0.0
 
     df = pd.read_csv(f)
@@ -50,14 +63,12 @@ for f in move_n_files:
     if valid_opt.empty:
         continue
 
-    # Zero optitrack at first valid row (home position)
     home_xyz = valid_opt.iloc[0].values
     df = df.copy()
     df['optitrack_x'] -= home_xyz[0]
     df['optitrack_y'] -= home_xyz[1]
     df['optitrack_z'] -= home_xyz[2]
 
-    # Zero motors at first valid motor row
     valid_mot = df[mot_cols].dropna()
     if valid_mot.empty:
         continue
@@ -65,10 +76,11 @@ for f in move_n_files:
     for i, col in enumerate(mot_cols):
         df[col] -= int(home_mot[i])
 
-    # Convert to mm
-    df['east_mm']  = df['optitrack_x'] * 1000
-    df['north_mm'] = df['optitrack_y'] * 1000
-    df['up_mm']    = df['optitrack_z'] * 1000
+    df['east_mm']  =  df['optitrack_x'] * 1000
+    df['north_mm'] =  df['optitrack_y'] * 1000
+    df['west_mm']  = -df['optitrack_x'] * 1000
+    df['up_mm']    =  df['optitrack_z'] * 1000
+    df['diag_mm']  = np.sqrt(df['east_mm']**2 + df['north_mm']**2)
 
     trajectories.append({
         'name':      f.name,
@@ -79,14 +91,13 @@ for f in move_n_files:
 trajectories.sort(key=lambda x: x['amplitude'])
 print(f"Loaded {len(trajectories)} valid trajectories")
 
-# ── Colour map: amplitude → colour ───────────────────────────────────────────
+# ── Colour map ────────────────────────────────────────────────────────────────
 amps      = sorted(set(t['amplitude'] for t in trajectories))
-colorscale = 'Plasma'
 n         = max(len(amps) - 1, 1)
 amp_color = {a: f"hsl({int(280 * i / n)},80%,50%)" for i, a in enumerate(amps)}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plot 1 — Top-down view  (East vs North)
+# Plot 1 — Top-down view  (North vs East)
 # ─────────────────────────────────────────────────────────────────────────────
 # %%
 fig1 = go.Figure()
@@ -95,7 +106,7 @@ for t in trajectories:
     df  = t['df']
     amp = t['amplitude']
     fig1.add_trace(go.Scatter(
-        x=df['east_mm'],
+        x=df['west_mm'],
         y=df['north_mm'],
         mode='lines',
         name=f"{amp:.0f}°",
@@ -104,7 +115,6 @@ for t in trajectories:
         showlegend=True,
     ))
 
-# Home marker
 fig1.add_trace(go.Scatter(
     x=[0], y=[0], mode='markers',
     marker=dict(size=12, color='lime', symbol='circle',
@@ -113,9 +123,9 @@ fig1.add_trace(go.Scatter(
 ))
 
 fig1.update_layout(
-    title='move_N_ Trajectories — Top-Down View<br>'
-          '<sup>North vs East displacement from home</sup>',
-    xaxis_title='East Displacement (mm)',
+    title='move_NW_ Trajectories — Top-Down View<br>'
+          '<sup>North vs West displacement from home</sup>',
+    xaxis_title='West Displacement (mm)',
     yaxis_title='North Displacement (mm)',
     xaxis=dict(scaleanchor='y', scaleratio=1),
     legend_title='Amplitude',
@@ -125,7 +135,7 @@ fig1.update_layout(
 fig1.show()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plot 2 — Side view  (North vs Up)
+# Plot 2 — Side view  (NW diagonal magnitude vs Up)
 # ─────────────────────────────────────────────────────────────────────────────
 # %%
 fig2 = go.Figure()
@@ -134,7 +144,7 @@ for t in trajectories:
     df  = t['df']
     amp = t['amplitude']
     fig2.add_trace(go.Scatter(
-        x=df['north_mm'],
+        x=df['diag_mm'],
         y=df['up_mm'],
         mode='lines',
         name=f"{amp:.0f}°",
@@ -151,9 +161,9 @@ fig2.add_trace(go.Scatter(
 ))
 
 fig2.update_layout(
-    title='move_N_ Trajectories — Side View<br>'
-          '<sup>Up displacement vs North displacement from home</sup>',
-    xaxis_title='North Displacement (mm)',
+    title='move_NW_ Trajectories — Side View<br>'
+          '<sup>Up displacement vs NW diagonal magnitude from home</sup>',
+    xaxis_title='NW Diagonal Magnitude (mm)',
     yaxis_title='Up Displacement (mm)',
     legend_title='Amplitude',
     template='plotly_white',
@@ -171,7 +181,7 @@ for t in trajectories:
     df  = t['df']
     amp = t['amplitude']
     fig3.add_trace(go.Scatter3d(
-        x=df['east_mm'],
+        x=df['west_mm'],
         y=df['north_mm'],
         z=df['up_mm'],
         mode='lines',
@@ -189,9 +199,9 @@ fig3.add_trace(go.Scatter3d(
 ))
 
 fig3.update_layout(
-    title='move_N_ Trajectories — 3D View',
+    title='move_NW_ Trajectories — 3D View',
     scene=dict(
-        xaxis_title='East (mm)',
+        xaxis_title='West (mm)',
         yaxis_title='North (mm)',
         zaxis_title='Up (mm)',
         aspectmode='data',
@@ -203,20 +213,18 @@ fig3.update_layout(
 fig3.show()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plot 4 — Motor  1 and 3 positions vs North displacement
+# Plot 4 — All motor positions vs NW diagonal magnitude
 # ─────────────────────────────────────────────────────────────────────────────
 # %%
-from plotly.subplots import make_subplots
-
 fig4 = make_subplots(
     rows=2, cols=2,
-    subplot_titles=['Motor 1 vs North',
-                    'Motor 3 vs North'],
+    subplot_titles=['Motor 1 (North pull) vs NW',    'Motor 2 (East release) vs NW',
+                    'Motor 3 (South release) vs NW', 'Motor 4 (West pull) vs NW'],
     shared_xaxes=False,
 )
 
-mot_cols = ['motor_1_pos', 'motor_3_pos']
-positions = [(1,1), (1,2)]
+mot_cols = ['motor_1_pos', 'motor_2_pos', 'motor_3_pos', 'motor_4_pos']
+positions = [(1, 1), (1, 2), (2, 1), (2, 2)]
 
 for mi, (mot_col, pos) in enumerate(zip(mot_cols, positions)):
     row, col = pos
@@ -224,44 +232,40 @@ for mi, (mot_col, pos) in enumerate(zip(mot_cols, positions)):
         df  = t['df']
         amp = t['amplitude']
         fig4.add_trace(go.Scatter(
-            x=df['north_mm'],
+            x=df['diag_mm'],
             y=df[mot_col],
             mode='lines',
             name=f"{amp:.0f}°",
             line=dict(color=amp_color[amp], width=1.5),
             legendgroup=f"{amp:.0f}",
-            showlegend=(mi == 0),   # legend only on first subplot
+            showlegend=(mi == 0),
         ), row=row, col=col)
 
 fig4.update_layout(
-    title='Motor Positions vs North Displacement<br>'
-          '<sup>Pulses from home — all move_N_ trajectories</sup>',
+    title='Motor Positions vs NW Diagonal Magnitude<br>'
+          '<sup>Pulses from home — all move_NW_ trajectories</sup>',
     template='plotly_white',
     legend_title='Amplitude',
     width=950, height=750,
 )
 for r, c in positions:
-    fig4.update_xaxes(title_text='North Displacement (mm)', row=r, col=c)
+    fig4.update_xaxes(title_text='NW Diagonal Magnitude (mm)', row=r, col=c)
     fig4.update_yaxes(title_text='Motor Position (pulses from home)', row=r, col=c)
 
 fig4.show()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plot 5 — Motor 1 & 3 positions vs Up displacement
+# Plot 5 — All motor positions vs Up displacement
 # ─────────────────────────────────────────────────────────────────────────────
 # %%
-from plotly.subplots import make_subplots
-
 fig5 = make_subplots(
-    rows=1, cols=2,
-    subplot_titles=['Motor 1 vs Up', 'Motor 3 vs Up'],
+    rows=2, cols=2,
+    subplot_titles=['Motor 1 (North pull) vs Up',    'Motor 2 (East release) vs Up',
+                    'Motor 3 (South release) vs Up', 'Motor 4 (West pull) vs Up'],
     shared_xaxes=False,
 )
 
-mot_cols_up = ['motor_1_pos', 'motor_3_pos']
-positions_up = [(1, 1), (1, 2)]
-
-for mi, (mot_col, pos) in enumerate(zip(mot_cols_up, positions_up)):
+for mi, (mot_col, pos) in enumerate(zip(mot_cols, positions)):
     row, col = pos
     for ti, t in enumerate(trajectories):
         df  = t['df']
@@ -278,12 +282,12 @@ for mi, (mot_col, pos) in enumerate(zip(mot_cols_up, positions_up)):
 
 fig5.update_layout(
     title='Motor Positions vs Up Displacement<br>'
-          '<sup>Pulses from home — all move_N_ trajectories (Motor 1 = North pull, Motor 3 = South release)</sup>',
+          '<sup>Pulses from home — all move_NW_ trajectories</sup>',
     template='plotly_white',
     legend_title='Amplitude',
-    width=950, height=500,
+    width=950, height=750,
 )
-for r, c in positions_up:
+for r, c in positions:
     fig5.update_xaxes(title_text='Up Displacement (mm)', row=r, col=c)
     fig5.update_yaxes(title_text='Motor Position (pulses from home)', row=r, col=c)
 
