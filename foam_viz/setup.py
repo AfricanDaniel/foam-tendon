@@ -23,7 +23,7 @@ setup(
     entry_points={
         'console_scripts': [
             'trajectory_replayer   = foam_viz.trajectory_replayer:main',
-            'compare_trajectories  = foam_viz.compare_trajectories:main',
+            # TODO: compare_trajectories
         ],
     },
 )

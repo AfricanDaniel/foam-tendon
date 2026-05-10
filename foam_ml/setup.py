@@ -23,10 +23,7 @@ setup(
     license='TODO: License declaration',
     entry_points={
         'console_scripts': [
-            'train_model         = foam_ml.train_model:main',
-            'option1_dome        = foam_ml.option1_dome:main',
-            'option2_coordinate  = foam_ml.option2_coordinate:main',
-            'option3_path_draw   = foam_ml.option3_path_draw:main',
+            # TODO: train_model, option1_dome, option2_coordinate, option3_path_draw
         ],
     },
 )
