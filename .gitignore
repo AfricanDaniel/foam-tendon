@@ -8,7 +8,6 @@ __pycache__/
 build/
 install/
 log/
-actuator/data_collection
 actuator/optitrack_data
 ml_env
 
@@ -27,3 +26,4 @@ actuator_interfaces/srv/ExecuteMotorTrajectory.srv
 
 # ── foam_viz: ML comparison tool hidden (TODO) ───────────────────────────────
 foam_viz/foam_viz/compare_trajectories.py
+foam_viz/foam_viz/trajectory_replayer_legacy.py
