@@ -82,6 +82,17 @@ by_dir = defaultdict(list)
 for t in trajectories:
     by_dir[t['direction']].append(t)
 
+# It looks like this
+# by_dir = {
+#     "N": [
+#         {direction: "N", amplitude: 60.0, df: <DataFrame>},   # From run_0001
+#         {direction: "N", amplitude: 100.0, df: <DataFrame>}   # From run_0003
+#     ],
+#     "E": [
+#         {direction: "E", amplitude: 380.0, df: <DataFrame>}   # From run_0161
+#     ]
+# }
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Plot 1 — Top-Down View
 # ─────────────────────────────────────────────────────────────────────────────
