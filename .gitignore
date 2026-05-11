@@ -11,6 +11,9 @@ log/
 actuator/optitrack_data
 ml_env
 
+actuator/data_collection/ml_runs
+actuator/data_collection/training_data
+
 # ── foam_ml: ML scripts hidden until next week (TODO) ────────────────────────
 foam_ml/foam_ml/train_model.py
 foam_ml/foam_ml/model_utils.py
