@@ -19,6 +19,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/MoveFoam.srv"
   "srv/MoveFoamCircle.srv"
   "srv/MoveFoamSquare.srv"
+  "srv/ExecuteMotorTrajectory.srv"
 )
 
 if(BUILD_TESTING)

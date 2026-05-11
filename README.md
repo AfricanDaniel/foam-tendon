@@ -36,13 +36,12 @@ running `foam_controller_node`.
 │   │
 │   ├── actuator/                        ← motor control, OptiTrack, data collection
 │   │   ├── README.md
-│   │   ├── actuator/
-│   │   │   ├── foam_controller_node.py  # main 4-motor control node
-│   │   │   ├── motor_service_node.py    # single-motor dev/debug node
-│   │   │   ├── collect_training_data.py # automated dataset collection
-│   │   │   ├── single_dynamixel.py      # standalone motor smoke-test script
-│   │   │   └── natnet/                  # NatNet SDK client (OptiTrack)
-│   │   └── data_collection/             # timestamped CSVs written here at runtime
+│   │   └── actuator/
+│   │       ├── foam_controller_node.py  # main 4-motor control node
+│   │       ├── motor_service_node.py    # single-motor dev/debug node
+│   │       ├── collect_training_data.py # automated dataset collection
+│   │       ├── single_dynamixel.py      # standalone motor smoke-test script
+│   │       └── natnet/                  # NatNet SDK client (OptiTrack)
 │   │
 │   ├── actuator_interfaces/             ← custom ROS 2 service definitions
 │   │   └── srv/
@@ -50,11 +49,21 @@ running `foam_controller_node`.
 │   │       ├── MoveFoamCircle.srv
 │   │       ├── MoveFoamSquare.srv
 │   │       └── MoveByDegrees.srv
+│   │           # TODO: ExecuteMotorTrajectory.srv
+│   │
+│   ├── foam_ml/                         ← ML analysis for the foam robot
+│   │   ├── README.md
+│   │   └── foam_ml/
+│   │       ├── north_height_model.py    # North ↔ Up ↔ Motor model analysis
+│   │       └── north_trajectories.py    # Trajectory visualisation for move_N_ data
+│   │           # TODO: train_model, model_utils, option1_dome, option2_coordinate,
+│   │           #       option3_path_draw, models/
 │   │
 │   └── foam_viz/                        ← trajectory replay and visualisation
 │       ├── README.md
 │       └── foam_viz/
 │           └── trajectory_replayer.py
+│               # TODO: compare_trajectories.py
 │
 ├── foam_motor_state.csv                 ← persisted motor + home positions
 └── install/ build/ log/                 ← colcon output (not committed)
@@ -68,7 +77,8 @@ running `foam_controller_node`.
 |---|---|
 | ROS 2 Kilted | `source /opt/ros/kilted/setup.bash` |
 | Dynamixel SDK | `pip install dynamixel-sdk` |
-| matplotlib, numpy | `pip install matplotlib numpy` |
+| matplotlib, numpy, scipy | included with ROS |
+| scikit-learn | `sudo apt install python3-sklearn` (required for `foam_ml`) |
 | OptiTrack / Motive | Required for live data collection; optional for replay |
 
 ---
@@ -80,13 +90,6 @@ cd <ws_root>
 source /opt/ros/kilted/setup.bash
 colcon build
 source install/setup.bash
-```
-
-Build a single package (faster during development):
-
-```bash
-colcon build --packages-select actuator
-colcon build --packages-select foam_viz
 ```
 
 ---
@@ -126,12 +129,15 @@ CSVs land in `src/actuator/data_collection/` automatically.
 
 ```bash
 ros2 run foam_viz trajectory_replayer --file run_0001_20260430_002346_move_N_90.0deg.csv
-
-# Static (non-animated) overview
 ros2 run foam_viz trajectory_replayer --file move_N_90 --no-anim
-
-# 3× speed replay
 ros2 run foam_viz trajectory_replayer --file move_N_90 --speed 3.0
+```
+
+### 5 — Run ML analysis scripts
+
+```bash
+python3 src/foam_ml/foam_ml/north_trajectories.py
+python3 src/foam_ml/foam_ml/north_height_model.py
 ```
 
 ---
@@ -146,9 +152,7 @@ All visualisation and logged data uses the **robot frame**:
 | North | physical North | `optitrack_y` |
 | Up    | vertically up  | `optitrack_z` |
 
-Home position (foam at rest) is `(0, 0, 0)`. Verified empirically:
-commanding `/move_foam N` produces a positive NatNet-Y displacement;
-commanding `/move_foam E` produces a positive NatNet-X displacement.
+Home position (foam at rest) is `(0, 0, 0)`.
 
 ---
 
@@ -158,4 +162,5 @@ commanding `/move_foam E` produces a positive NatNet-X displacement.
 |---|---|---|---|
 | `actuator` | ament_python | Motor control, OptiTrack, data logging | [actuator/README.md](actuator/README.md) |
 | `actuator_interfaces` | ament_cmake | Custom service message definitions | — |
-| `foam_viz` | ament_python | Trajectory replay and 2D/3D visualisation | [foam_viz/README.md](foam_viz/README.md) |
+| `foam_ml` | ament_python | ML analysis scripts | [foam_ml/README.md](foam_ml/README.md) |
+| `foam_viz` | ament_python | Trajectory replay and visualisation | [foam_viz/README.md](foam_viz/README.md) |

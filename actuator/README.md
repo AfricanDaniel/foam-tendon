@@ -193,6 +193,16 @@ ros2 service call /set_home std_srvs/srv/Trigger {}
 
 ---
 
+#### `/execute_motor_trajectory` — `actuator_interfaces/srv/ExecuteMotorTrajectory` *(TODO)*
+
+Executes a sequence of motor position waypoints supplied by an external node
+(e.g. `foam_ml`). Collects OptiTrack data continuously across the entire
+trajectory and returns the path to the recorded CSV.
+
+> **TODO:** This service definition and its handler are hidden for now.
+
+---
+
 #### `/optitrack_status` — `std_srvs/srv/Trigger`
 
 Report OptiTrack connection status and the most recently received rigid-body

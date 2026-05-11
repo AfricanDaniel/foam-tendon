@@ -1,6 +1,8 @@
+import glob
+import os
 from setuptools import find_packages, setup
 
-package_name = 'foam_viz'
+package_name = 'foam_ml'
 
 setup(
     name=package_name,
@@ -10,20 +12,18 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/models',
+            [f for f in glob.glob('models/*') if os.path.isfile(f)]),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='daniel',
     maintainer_email='danielaugustin2027@u.northwestern.edu',
-    description='Visualization tools for the single-column foam robot',
+    description='ML models and interactive interfaces for the foam robot',
     license='TODO: License declaration',
-    extras_require={
-        'test': ['pytest'],
-    },
     entry_points={
         'console_scripts': [
-            'trajectory_replayer   = foam_viz.trajectory_replayer:main',
-            # TODO: compare_trajectories
+            # TODO: train_model, option1_dome, option2_coordinate, option3_path_draw
         ],
     },
 )

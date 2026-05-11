@@ -35,10 +35,12 @@ import argparse
 import os
 import sys
 
-import matplotlib
-import matplotlib.animation as animation
-import matplotlib.pyplot as plt
 import numpy as np
+import plotly.graph_objects as go
+import plotly.io as pio
+from plotly.subplots import make_subplots
+
+pio.renderers.default = 'browser'
 
 # ── Locate the data_collection directory ──────────────────────────────────────
 
@@ -68,20 +70,31 @@ DATA_DIR = _find_data_dir()
 def _resolve_path(name: str) -> str:
     if os.path.isabs(name) and os.path.isfile(name):
         return name
-    direct = os.path.join(DATA_DIR, name)
-    if os.path.isfile(direct):
-        return direct
-    # Try prefix match in data_collection/
-    if os.path.isdir(DATA_DIR):
-        matches = [f for f in sorted(os.listdir(DATA_DIR)) if name in f and f.endswith('.csv')]
-        if len(matches) == 1:
-            return os.path.join(DATA_DIR, matches[0])
-        if len(matches) > 1:
-            print(f'Ambiguous match for "{name}":')
-            for m in matches:
-                print(f'  {m}')
-            sys.exit(1)
-    print(f'File not found: "{name}"\nSearched in: {DATA_DIR}')
+    # Search data_collection/ and its known subdirectories
+    search_dirs = [
+        DATA_DIR,
+        os.path.join(DATA_DIR, 'training_data'),
+        os.path.join(DATA_DIR, 'ml_runs'),
+    ]
+    for d in search_dirs:
+        direct = os.path.join(d, name)
+        if os.path.isfile(direct):
+            return direct
+    # Try substring match across all search dirs
+    all_matches = []
+    for d in search_dirs:
+        if os.path.isdir(d):
+            for f in sorted(os.listdir(d)):
+                if name in f and f.endswith('.csv'):
+                    all_matches.append(os.path.join(d, f))
+    if len(all_matches) == 1:
+        return all_matches[0]
+    if len(all_matches) > 1:
+        print(f'Ambiguous match for "{name}":')
+        for m in all_matches:
+            print(f'  {m}')
+        sys.exit(1)
+    print(f'File not found: "{name}"\nSearched in: {", ".join(search_dirs)}')
     sys.exit(1)
 
 
@@ -164,282 +177,346 @@ def load_csv(path: str) -> dict:
     }
 
 
-# ── Plotting helpers ───────────────────────────────────────────────────────────
+# ── Shared layout helper ───────────────────────────────────────────────────────
 
 _MOTOR_LABELS = ['M1 North', 'M2 East', 'M3 South', 'M4 West']
 _MOTOR_COLORS = ['#e74c3c', '#2ecc71', '#3498db', '#f39c12']
 
 
-def _colormap_line(ax, x, y, z, t, cmap='plasma', lw=1.5):
-    """Draw a 3D line coloured by time using a LineCollection-style approach."""
-    from matplotlib.collections import LineCollection
-    # Build segments in 3D by projecting to 2D isn't straightforward;
-    # use scatter for colour and a plain line for the path.
-    ax.plot(x, y, z, color='gray', lw=0.6, alpha=0.4)
-    sc = ax.scatter(x, y, z, c=t, cmap=cmap, s=4, zorder=3, depthshade=False)
-    return sc
-
-
-def _axis_equal_3d(ax, x, y, z, margin=0.01):
-    """Force equal aspect ratio on a 3D axis."""
-    xr = [x.min() - margin, x.max() + margin]
-    yr = [y.min() - margin, y.max() + margin]
-    zr = [z.min() - margin, z.max() + margin]
-    half = max(xr[1]-xr[0], yr[1]-yr[0], zr[1]-zr[0]) / 2
-    cx = np.mean(xr); cy = np.mean(yr); cz = np.mean(zr)
-    ax.set_xlim(cx - half, cx + half)
-    ax.set_ylim(cy - half, cy + half)
-    ax.set_zlim(cz - half, cz + half)
+def _base_fig(title: str) -> go.Figure:
+    """2×3 subplot figure: 3D scene spans left column, 2D panels fill right."""
+    fig = make_subplots(
+        rows=2, cols=3,
+        specs=[
+            [{'type': 'scene', 'rowspan': 2}, {'type': 'xy'}, {'type': 'xy'}],
+            [None,                             {'type': 'xy'}, {'type': 'xy'}],
+        ],
+        subplot_titles=['3D View', 'Top-Down (E–N)', 'Side (E–Up)',
+                        '',        'Motor Positions',  'Side (N–Up)'],
+        column_widths=[0.40, 0.30, 0.30],
+        row_heights=[0.50, 0.50],
+        horizontal_spacing=0.08,
+        vertical_spacing=0.12,
+    )
+    fig.update_layout(
+        title_text=title,
+        template='plotly_white',
+        width=1350, height=720,
+        scene=dict(
+            xaxis_title='East (mm)',
+            yaxis_title='North (mm)',
+            zaxis_title='Up (mm)',
+            aspectmode='data',
+            camera=dict(eye=dict(x=2.0, y=2.0, z=1.5)),
+        ),
+        legend=dict(x=1.02, y=1.0, xanchor='left'),
+    )
+    # Top-down (E–N): equal aspect, dtick=10 on both axes
+    fig.update_xaxes(title_text='East (mm)',  scaleanchor='y',  scaleratio=1, dtick=10, row=1, col=2)
+    fig.update_yaxes(title_text='North (mm)',                                 dtick=10, row=1, col=2)
+    # Side E–Up: equal aspect, dtick=10 on both axes
+    fig.update_xaxes(title_text='East (mm)',  scaleanchor='y2', scaleratio=1, dtick=10, row=1, col=3)
+    fig.update_yaxes(title_text='Up (mm)',                                    dtick=10, row=1, col=3)
+    # Motor plot: no equal aspect needed
+    fig.update_xaxes(title_text='Time (s)',                                             row=2, col=2)
+    fig.update_yaxes(title_text='Position (pulses)',                                    row=2, col=2)
+    # Side N–Up: equal aspect, dtick=10 on both axes
+    fig.update_xaxes(title_text='North (mm)', scaleanchor='y4', scaleratio=1, dtick=10, row=2, col=3)
+    fig.update_yaxes(title_text='Up (mm)',                                    dtick=10, row=2, col=3)
+    return fig
 
 
 # ── Static overview plot ───────────────────────────────────────────────────────
 
 def plot_static(data: dict) -> None:
-    """Show a 4-panel static overview of the full trajectory."""
-    east  = data['east']  * 1000   # → mm for readability
-    north = data['north'] * 1000
-    up    = data['up']    * 1000
-    t     = data['t']
+    """Open a 5-panel static overview of the full trajectory in the browser."""
+    east   = data['east']  * 1000   # → mm
+    north  = data['north'] * 1000
+    up     = data['up']    * 1000
+    t      = data['t']
     motors = data['motors']
     label  = data['label']
 
-    fig = plt.figure(figsize=(14, 10))
-    fig.suptitle(label, fontsize=11, fontweight='bold')
+    fig = _base_fig(label)
 
-    # ── 3D trajectory ──────────────────────────────────────────────────────────
-    ax3d = fig.add_subplot(2, 3, (1, 4), projection='3d')
-    _colormap_line(ax3d, east, north, up, t)
-    ax3d.scatter([0], [0], [0], color='lime', s=80, zorder=5, label='Home')
-    ax3d.scatter([east[0]], [north[0]], [up[0]],
-                 color='deepskyblue', marker='^', s=100, zorder=5, label='Start')
-    ax3d.scatter(east[-1], north[-1], up[-1],
-                 color='red', marker='*', s=120, zorder=5, label='End')
-    ax3d.set_xlabel('East (mm)')
-    ax3d.set_ylabel('North (mm)')
-    ax3d.set_zlabel('Up (mm)')
-    ax3d.set_title('3D trajectory')
-    ax3d.legend(fontsize=8)
-    _axis_equal_3d(ax3d, east, north, up)
-    # Add cardinal direction text
-    lim = ax3d.get_ylim()[1]
-    ax3d.text(0, lim, 0, 'N', color='gray', fontsize=8, ha='center')
-    ax3d.text(ax3d.get_xlim()[1], 0, 0, 'E', color='gray', fontsize=8, ha='center')
+    # ── 3D trajectory coloured by time ────────────────────────────────────────
+    fig.add_trace(go.Scatter3d(
+        x=east, y=north, z=up, mode='lines',
+        line=dict(color='lightgray', width=2), opacity=0.5,
+        showlegend=False,
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter3d(
+        x=east, y=north, z=up, mode='markers',
+        marker=dict(size=3, color=t, colorscale='Plasma', showscale=True,
+                    colorbar=dict(title='Time (s)', len=0.45, x=0.37)),
+        name='Trajectory', showlegend=False,
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter3d(
+        x=[0], y=[0], z=[0], mode='markers',
+        marker=dict(size=9, color='lime'), name='Home',
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter3d(
+        x=[east[0]], y=[north[0]], z=[up[0]], mode='markers',
+        marker=dict(size=9, color='deepskyblue', symbol='diamond'), name='Start',
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter3d(
+        x=[east[-1]], y=[north[-1]], z=[up[-1]], mode='markers',
+        marker=dict(size=9, color='red', symbol='cross'), name='End',
+    ), row=1, col=1)
 
-    # ── Top-down (East–North) ──────────────────────────────────────────────────
-    ax_top = fig.add_subplot(2, 3, 2)
-    sc = ax_top.scatter(east, north, c=t, cmap='plasma', s=6)
-    ax_top.plot(east, north, color='gray', lw=0.5, alpha=0.4)
-    ax_top.scatter(0, 0, color='lime', s=80, zorder=5, label='Home')
-    ax_top.scatter(east[0], north[0], color='deepskyblue', marker='^', s=80, zorder=5, label='Start')
-    ax_top.scatter(east[-1], north[-1], color='red', marker='*', s=100, zorder=5, label='End')
-    ax_top.set_xlabel('East (mm)')
-    ax_top.set_ylabel('North (mm)')
-    ax_top.set_title('Top-down view (E–N)')
-    ax_top.set_aspect('equal')
-    ax_top.axhline(0, color='k', lw=0.4, alpha=0.3)
-    ax_top.axvline(0, color='k', lw=0.4, alpha=0.3)
-    ax_top.legend(fontsize=8)
-    # Cardinal arrows
-    _add_cardinal_arrows(ax_top)
+    # ── Top-down (E–N) ────────────────────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=east, y=north, mode='lines+markers',
+        marker=dict(size=3, color=t, colorscale='Plasma', showscale=False),
+        line=dict(color='lightgray', width=1),
+        showlegend=False,
+    ), row=1, col=2)
+    fig.add_trace(go.Scatter(x=[0], y=[0], mode='markers',
+        marker=dict(size=9, color='lime'), showlegend=False), row=1, col=2)
+    fig.add_trace(go.Scatter(x=[east[0]], y=[north[0]], mode='markers',
+        marker=dict(size=9, color='deepskyblue', symbol='diamond'),
+        showlegend=False), row=1, col=2)
+    fig.add_trace(go.Scatter(x=[east[-1]], y=[north[-1]], mode='markers',
+        marker=dict(size=9, color='red', symbol='cross'),
+        showlegend=False), row=1, col=2)
 
-    # ── Side view East (East–Up) ───────────────────────────────────────────────
-    ax_e = fig.add_subplot(2, 3, 3)
-    ax_e.scatter(east, up, c=t, cmap='plasma', s=6)
-    ax_e.plot(east, up, color='gray', lw=0.5, alpha=0.4)
-    ax_e.scatter(0, 0, color='lime', s=80, zorder=5)
-    ax_e.scatter(east[0], up[0], color='deepskyblue', marker='^', s=80, zorder=5)
-    ax_e.scatter(east[-1], up[-1], color='red', marker='*', s=100, zorder=5)
-    ax_e.set_xlabel('East (mm)')
-    ax_e.set_ylabel('Up (mm)')
-    ax_e.set_title('Side view (E–Up)')
-    ax_e.set_aspect('equal')
-    ax_e.axhline(0, color='k', lw=0.4, alpha=0.3)
-    ax_e.axvline(0, color='k', lw=0.4, alpha=0.3)
-
-    # ── Side view North (North–Up) ─────────────────────────────────────────────
-    ax_n = fig.add_subplot(2, 3, 6)
-    ax_n.scatter(north, up, c=t, cmap='plasma', s=6)
-    ax_n.plot(north, up, color='gray', lw=0.5, alpha=0.4)
-    ax_n.scatter(0, 0, color='lime', s=80, zorder=5)
-    ax_n.scatter(north[0], up[0], color='deepskyblue', marker='^', s=80, zorder=5)
-    ax_n.scatter(north[-1], up[-1], color='red', marker='*', s=100, zorder=5)
-    ax_n.set_xlabel('North (mm)')
-    ax_n.set_ylabel('Up (mm)')
-    ax_n.set_title('Side view (N–Up)')
-    ax_n.set_aspect('equal')
-    ax_n.axhline(0, color='k', lw=0.4, alpha=0.3)
-    ax_n.axvline(0, color='k', lw=0.4, alpha=0.3)
-
-    # Shared colourbar (time)
-    cb = fig.colorbar(sc, ax=[ax_top, ax_e, ax_n], shrink=0.6, label='Time (s)')
+    # ── Side E–Up ─────────────────────────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=east, y=up, mode='lines+markers',
+        marker=dict(size=3, color=t, colorscale='Plasma', showscale=False),
+        line=dict(color='lightgray', width=1),
+        showlegend=False,
+    ), row=1, col=3)
+    fig.add_trace(go.Scatter(x=[0], y=[0], mode='markers',
+        marker=dict(size=9, color='lime'), showlegend=False), row=1, col=3)
+    fig.add_trace(go.Scatter(x=[east[0]], y=[up[0]], mode='markers',
+        marker=dict(size=9, color='deepskyblue', symbol='diamond'),
+        showlegend=False), row=1, col=3)
+    fig.add_trace(go.Scatter(x=[east[-1]], y=[up[-1]], mode='markers',
+        marker=dict(size=9, color='red', symbol='cross'),
+        showlegend=False), row=1, col=3)
 
     # ── Motor positions ────────────────────────────────────────────────────────
-    ax_m = fig.add_subplot(2, 3, 5)
     for i in range(4):
-        ax_m.plot(t, motors[:, i], color=_MOTOR_COLORS[i],
-                  label=_MOTOR_LABELS[i], lw=1.2)
-    ax_m.set_xlabel('Time (s)')
-    ax_m.set_ylabel('Position (pulses from home)')
-    ax_m.set_title('Motor positions')
-    ax_m.legend(fontsize=7)
-    ax_m.axhline(0, color='k', lw=0.4, alpha=0.3)
+        fig.add_trace(go.Scatter(
+            x=t, y=motors[:, i], mode='lines',
+            line=dict(color=_MOTOR_COLORS[i], width=2),
+            name=_MOTOR_LABELS[i],
+        ), row=2, col=2)
 
-    fig.tight_layout()
-    plt.show()
+    # ── Side N–Up ─────────────────────────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=north, y=up, mode='lines+markers',
+        marker=dict(size=3, color=t, colorscale='Plasma', showscale=False),
+        line=dict(color='lightgray', width=1),
+        showlegend=False,
+    ), row=2, col=3)
+    fig.add_trace(go.Scatter(x=[0], y=[0], mode='markers',
+        marker=dict(size=9, color='lime'), showlegend=False), row=2, col=3)
+    fig.add_trace(go.Scatter(x=[north[0]], y=[up[0]], mode='markers',
+        marker=dict(size=9, color='deepskyblue', symbol='diamond'),
+        showlegend=False), row=2, col=3)
+    fig.add_trace(go.Scatter(x=[north[-1]], y=[up[-1]], mode='markers',
+        marker=dict(size=9, color='red', symbol='cross'),
+        showlegend=False), row=2, col=3)
 
-
-def _add_cardinal_arrows(ax):
-    """Add N/E compass labels to a 2D East–North plot."""
-    xl, xr = ax.get_xlim()
-    yb, yt = ax.get_ylim()
-    cx = (xl + xr) / 2
-    cy = (yb + yt) / 2
-    dx = (xr - xl) * 0.04
-    dy = (yt - yb) * 0.04
-    ax.text(xr - dx, cy, 'E→', fontsize=7, color='gray', va='center')
-    ax.text(cx, yt - dy, '↑N', fontsize=7, color='gray', ha='center')
+    fig.show()
 
 
 # ── Animation ──────────────────────────────────────────────────────────────────
 
 def plot_animated(data: dict, speed: float = 1.0) -> None:
-    """Animate the rigid-body replay with a 4-panel layout."""
-    east  = data['east']  * 1000   # → mm
-    north = data['north'] * 1000
-    up    = data['up']    * 1000
-    t     = data['t']
+    """Open an interactive animation in the browser with play/pause and a scrub bar."""
+    east   = data['east']  * 1000   # → mm
+    north  = data['north'] * 1000
+    up     = data['up']    * 1000
+    t      = data['t']
     motors = data['motors']
     label  = data['label']
     n      = len(t)
 
-    fig = plt.figure(figsize=(14, 9))
-    fig.suptitle(f'{label}  –  replay (speed ×{speed:.1f})', fontsize=10, fontweight='bold')
+    # Subsample so the browser stays responsive (≤ 250 frames)
+    MAX_FRAMES = 250
+    step = max(1, n // MAX_FRAMES)
+    frame_idx = list(range(0, n, step))
+    if frame_idx[-1] != n - 1:
+        frame_idx.append(n - 1)
 
-    pad = max(abs(east).max(), abs(north).max(), abs(up).max()) * 0.15 + 2.0
-    e_lim = (east.min()  - pad, east.max()  + pad)
-    n_lim = (north.min() - pad, north.max() + pad)
-    u_lim = (up.min()    - pad, up.max()    + pad)
-    half = max(e_lim[1]-e_lim[0], n_lim[1]-n_lim[0], u_lim[1]-u_lim[0]) / 2
+    motor_min = float(motors.min()) - 10
+    motor_max = float(motors.max()) + 10
 
-    # ── 3D panel ───────────────────────────────────────────────────────────────
-    ax3d = fig.add_subplot(2, 3, (1, 4), projection='3d')
-    ax3d.plot(east, north, up, color='lightgray', lw=0.8, alpha=0.5)
-    ax3d.scatter([0], [0], [0], color='lime', s=60, zorder=4, label='Home')
-    ax3d.scatter([east[0]], [north[0]], [up[0]],
-                 color='deepskyblue', marker='^', s=80, zorder=4, label='Start')
-    trail3d, = ax3d.plot([], [], [], color='royalblue', lw=1.5)
-    dot3d,   = ax3d.plot([], [], [], 'o', color='red', ms=8, zorder=5)
-    ax3d.set_xlabel('East (mm)')
-    ax3d.set_ylabel('North (mm)')
-    ax3d.set_zlabel('Up (mm)')
-    ax3d.set_title('3D view')
-    ax3d.legend(fontsize=8)
-    cx = (e_lim[0]+e_lim[1])/2; cy = (n_lim[0]+n_lim[1])/2; cz = (u_lim[0]+u_lim[1])/2
-    ax3d.set_xlim(cx-half, cx+half)
-    ax3d.set_ylim(cy-half, cy+half)
-    ax3d.set_zlim(cz-half, cz+half)
+    fig = _base_fig(f'{label}  –  replay  (speed ×{speed:.1f})')
 
-    # ── Top-down (E–N) ─────────────────────────────────────────────────────────
-    ax_top = fig.add_subplot(2, 3, 2)
-    ax_top.plot(east, north, color='lightgray', lw=0.8, alpha=0.5)
-    ax_top.scatter([0], [0], color='lime', s=60, zorder=4)
-    ax_top.scatter([east[0]], [north[0]], color='deepskyblue', marker='^', s=60, zorder=4)
-    trail_top, = ax_top.plot([], [], color='royalblue', lw=1.5)
-    dot_top,   = ax_top.plot([], [], 'o', color='red', ms=8, zorder=5)
-    ax_top.set_xlabel('East (mm)')
-    ax_top.set_ylabel('North (mm)')
-    ax_top.set_title('Top-down (E–N)')
-    ax_top.set_xlim(e_lim)
-    ax_top.set_ylim(n_lim)
-    ax_top.set_aspect('equal')
-    ax_top.axhline(0, color='k', lw=0.4, alpha=0.3)
-    ax_top.axvline(0, color='k', lw=0.4, alpha=0.3)
+    # ── Static base traces (trace index annotated) ───────────────────────────
+    #
+    # 3D panel
+    fig.add_trace(go.Scatter3d(           # 0  ghost full path
+        x=east, y=north, z=up, mode='lines',
+        line=dict(color='lightgray', width=1.5), opacity=0.4,
+        showlegend=False,
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter3d(           # 1  home
+        x=[0], y=[0], z=[0], mode='markers',
+        marker=dict(size=9, color='lime'), name='Home',
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter3d(           # 2  start
+        x=[east[0]], y=[north[0]], z=[up[0]], mode='markers',
+        marker=dict(size=9, color='deepskyblue', symbol='diamond'), name='Start',
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter3d(           # 3  ← animated trail 3D
+        x=[east[0]], y=[north[0]], z=[up[0]], mode='lines',
+        line=dict(color='royalblue', width=3),
+        showlegend=False,
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter3d(           # 4  ← animated dot 3D
+        x=[east[0]], y=[north[0]], z=[up[0]], mode='markers',
+        marker=dict(size=10, color='red'), name='Current',
+    ), row=1, col=1)
 
-    # ── Side East–Up ───────────────────────────────────────────────────────────
-    ax_e = fig.add_subplot(2, 3, 3)
-    ax_e.plot(east, up, color='lightgray', lw=0.8, alpha=0.5)
-    ax_e.scatter([0], [0], color='lime', s=60, zorder=4)
-    ax_e.scatter([east[0]], [up[0]], color='deepskyblue', marker='^', s=60, zorder=4)
-    trail_e, = ax_e.plot([], [], color='royalblue', lw=1.5)
-    dot_e,   = ax_e.plot([], [], 'o', color='red', ms=8, zorder=5)
-    ax_e.set_xlabel('East (mm)')
-    ax_e.set_ylabel('Up (mm)')
-    ax_e.set_title('Side (E–Up)')
-    ax_e.set_xlim(e_lim)
-    ax_e.set_ylim(u_lim)
-    ax_e.set_aspect('equal')
-    ax_e.axhline(0, color='k', lw=0.4, alpha=0.3)
-    ax_e.axvline(0, color='k', lw=0.4, alpha=0.3)
+    # Top-down panel
+    fig.add_trace(go.Scatter(             # 5  ghost top-down
+        x=east, y=north, mode='lines',
+        line=dict(color='lightgray', width=1), opacity=0.5,
+        showlegend=False,
+    ), row=1, col=2)
+    fig.add_trace(go.Scatter(             # 6  home top-down
+        x=[0], y=[0], mode='markers',
+        marker=dict(size=9, color='lime'), showlegend=False,
+    ), row=1, col=2)
+    fig.add_trace(go.Scatter(             # 7  ← animated trail top-down
+        x=[east[0]], y=[north[0]], mode='lines',
+        line=dict(color='royalblue', width=2), showlegend=False,
+    ), row=1, col=2)
+    fig.add_trace(go.Scatter(             # 8  ← animated dot top-down
+        x=[east[0]], y=[north[0]], mode='markers',
+        marker=dict(size=10, color='red'), showlegend=False,
+    ), row=1, col=2)
 
-    # ── Motor positions strip ──────────────────────────────────────────────────
-    ax_m = fig.add_subplot(2, 3, 5)
+    # Side E–Up panel
+    fig.add_trace(go.Scatter(             # 9  ghost E-Up
+        x=east, y=up, mode='lines',
+        line=dict(color='lightgray', width=1), opacity=0.5,
+        showlegend=False,
+    ), row=1, col=3)
+    fig.add_trace(go.Scatter(             # 10 home E-Up
+        x=[0], y=[0], mode='markers',
+        marker=dict(size=9, color='lime'), showlegend=False,
+    ), row=1, col=3)
+    fig.add_trace(go.Scatter(             # 11 ← animated trail E-Up
+        x=[east[0]], y=[up[0]], mode='lines',
+        line=dict(color='royalblue', width=2), showlegend=False,
+    ), row=1, col=3)
+    fig.add_trace(go.Scatter(             # 12 ← animated dot E-Up
+        x=[east[0]], y=[up[0]], mode='markers',
+        marker=dict(size=10, color='red'), showlegend=False,
+    ), row=1, col=3)
+
+    # Motor panel
     for i in range(4):
-        ax_m.plot(t, motors[:, i], color=_MOTOR_COLORS[i],
-                  lw=1.0, alpha=0.4, label=_MOTOR_LABELS[i])
-    motor_lines = [ax_m.axvline(t[0], color='red', lw=1.0)]
-    ax_m.set_xlabel('Time (s)')
-    ax_m.set_ylabel('Position (pulses)')
-    ax_m.set_title('Motor positions')
-    ax_m.legend(fontsize=7)
-    ax_m.axhline(0, color='k', lw=0.4, alpha=0.3)
-    time_text = ax_m.set_title('Motor positions  t=0.00 s')
+        fig.add_trace(go.Scatter(         # 13-16 motor lines
+            x=t, y=motors[:, i], mode='lines',
+            line=dict(color=_MOTOR_COLORS[i], width=1.5),
+            opacity=0.5, name=_MOTOR_LABELS[i],
+        ), row=2, col=2)
+    fig.add_trace(go.Scatter(             # 17 ← animated time cursor
+        x=[t[0], t[0]], y=[motor_min, motor_max],
+        mode='lines', line=dict(color='red', width=2, dash='dash'),
+        showlegend=False,
+    ), row=2, col=2)
 
-    # ── Side North–Up ──────────────────────────────────────────────────────────
-    ax_n = fig.add_subplot(2, 3, 6)
-    ax_n.plot(north, up, color='lightgray', lw=0.8, alpha=0.5)
-    ax_n.scatter([0], [0], color='lime', s=60, zorder=4)
-    ax_n.scatter([north[0]], [up[0]], color='deepskyblue', marker='^', s=60, zorder=4)
-    trail_n, = ax_n.plot([], [], color='royalblue', lw=1.5)
-    dot_n,   = ax_n.plot([], [], 'o', color='red', ms=8, zorder=5)
-    ax_n.set_xlabel('North (mm)')
-    ax_n.set_ylabel('Up (mm)')
-    ax_n.set_title('Side (N–Up)')
-    ax_n.set_xlim(n_lim)
-    ax_n.set_ylim(u_lim)
-    ax_n.set_aspect('equal')
-    ax_n.axhline(0, color='k', lw=0.4, alpha=0.3)
-    ax_n.axvline(0, color='k', lw=0.4, alpha=0.3)
+    # Side N–Up panel
+    fig.add_trace(go.Scatter(             # 18 ghost N-Up
+        x=north, y=up, mode='lines',
+        line=dict(color='lightgray', width=1), opacity=0.5,
+        showlegend=False,
+    ), row=2, col=3)
+    fig.add_trace(go.Scatter(             # 19 home N-Up
+        x=[0], y=[0], mode='markers',
+        marker=dict(size=9, color='lime'), showlegend=False,
+    ), row=2, col=3)
+    fig.add_trace(go.Scatter(             # 20 ← animated trail N-Up
+        x=[north[0]], y=[up[0]], mode='lines',
+        line=dict(color='royalblue', width=2), showlegend=False,
+    ), row=2, col=3)
+    fig.add_trace(go.Scatter(             # 21 ← animated dot N-Up
+        x=[north[0]], y=[up[0]], mode='markers',
+        marker=dict(size=10, color='red'), showlegend=False,
+    ), row=2, col=3)
 
-    fig.tight_layout()
+    # Indices of traces updated each frame (must match frame data order below)
+    ANIM_TRACES = [3, 4, 7, 8, 11, 12, 17, 20, 21]
 
-    # ── Animation callback ─────────────────────────────────────────────────────
-    frame_dt = np.diff(t, prepend=t[0])
-    frame_dt[0] = 0.0
+    # ── Build frames ──────────────────────────────────────────────────────────
+    frames = []
+    for k in frame_idx:
+        frames.append(go.Frame(
+            name=str(k),
+            traces=ANIM_TRACES,
+            data=[
+                go.Scatter3d(x=east[:k+1].tolist(),
+                             y=north[:k+1].tolist(),
+                             z=up[:k+1].tolist()),           # 3  trail 3D
+                go.Scatter3d(x=[east[k]], y=[north[k]],
+                             z=[up[k]]),                     # 4  dot 3D
+                go.Scatter(x=east[:k+1].tolist(),
+                           y=north[:k+1].tolist()),          # 7  trail top-down
+                go.Scatter(x=[east[k]], y=[north[k]]),       # 8  dot top-down
+                go.Scatter(x=east[:k+1].tolist(),
+                           y=up[:k+1].tolist()),             # 11 trail E-Up
+                go.Scatter(x=[east[k]], y=[up[k]]),          # 12 dot E-Up
+                go.Scatter(x=[t[k], t[k]],
+                           y=[motor_min, motor_max]),        # 17 time cursor
+                go.Scatter(x=north[:k+1].tolist(),
+                           y=up[:k+1].tolist()),             # 20 trail N-Up
+                go.Scatter(x=[north[k]], y=[up[k]]),         # 21 dot N-Up
+            ],
+        ))
 
-    def update(frame):
-        k = frame  # current row index
+    mean_dt    = float(np.mean(np.diff(t))) if len(t) > 1 else 0.05
+    frame_dur  = max(30, int(mean_dt * 1000 * step / speed))
 
-        # trails
-        trail3d.set_data(east[:k+1], north[:k+1])
-        trail3d.set_3d_properties(up[:k+1])
-        dot3d.set_data([east[k]], [north[k]])
-        dot3d.set_3d_properties([up[k]])
+    slider_steps = [
+        dict(
+            args=[[str(k)], {'frame': {'duration': frame_dur, 'redraw': True},
+                             'mode': 'immediate'}],
+            label=f'{t[k]:.1f}s',
+            method='animate',
+        )
+        for k in frame_idx
+    ]
 
-        trail_top.set_data(east[:k+1], north[:k+1])
-        dot_top.set_data([east[k]], [north[k]])
-
-        trail_e.set_data(east[:k+1], up[:k+1])
-        dot_e.set_data([east[k]], [up[k]])
-
-        trail_n.set_data(north[:k+1], up[:k+1])
-        dot_n.set_data([north[k]], [up[k]])
-
-        motor_lines[0].set_xdata([t[k], t[k]])
-        time_text.set_text(f'Motor positions  t={t[k]:.2f} s')
-
-        return (trail3d, dot3d, trail_top, dot_top,
-                trail_e, dot_e, trail_n, dot_n, motor_lines[0])
-
-    # Interval in ms between frames; use actual elapsed time scaled by speed
-    base_interval = float(np.mean(np.diff(t))) * 1000.0 / speed
-    interval_ms   = max(10.0, base_interval)
-
-    ani = animation.FuncAnimation(
-        fig, update, frames=n, interval=interval_ms,
-        blit=False, repeat=False
+    fig.frames = frames
+    fig.update_layout(
+        updatemenus=[dict(
+            type='buttons',
+            showactive=False,
+            y=-0.06, x=0.0, xanchor='left', yanchor='top',
+            buttons=[
+                dict(
+                    label='▶ Play',
+                    method='animate',
+                    args=[None, {'frame': {'duration': frame_dur, 'redraw': True},
+                                 'fromcurrent': True, 'mode': 'immediate'}],
+                ),
+                dict(
+                    label='⏸ Pause',
+                    method='animate',
+                    args=[[None], {'frame': {'duration': 0}, 'mode': 'immediate'}],
+                ),
+            ],
+        )],
+        sliders=[dict(
+            active=0,
+            steps=slider_steps,
+            x=0.07, len=0.90, xanchor='left',
+            y=-0.04, yanchor='top',
+            pad={'b': 10},
+            currentvalue=dict(prefix='t = ', visible=True, xanchor='center'),
+            transition=dict(duration=0),
+        )],
     )
 
-    plt.show()
+    fig.show()
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
