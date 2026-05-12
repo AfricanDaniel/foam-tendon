@@ -11,7 +11,7 @@ import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 
-from actuator_interfaces.srv import MoveFoam, MoveFoamCircle, MoveFoamSquare, ExecuteMotorTrajectory
+from actuator_interfaces.srv import MoveFoam, MoveFoamCircle, MoveFoamSquare
 
 from dynamixel_sdk import (
     PortHandler,
@@ -27,7 +27,7 @@ except ImportError:
     _NATNET_AVAILABLE = False
 
 # ── Hardware ──────────────────────────────────────────────────────────────────
-DEVICENAME = '/dev/ttyUSB0'
+DYNAMIXEL_PORTS = ['/dev/ttyDXL', '/dev/ttyUSB0']
 BAUDRATE = 1_000_000
 PROTOCOL_VERSION = 2.0
 
@@ -179,12 +179,17 @@ class FoamControllerNode(Node):
         # offline on startup we still have its last commanded position on hand.
         csv_existed = self._load_state_from_csv()
 
-        # Open serial port
-        self.port_handler   = PortHandler(DEVICENAME)
+        # Open serial port — try each candidate in order
         self.packet_handler = PacketHandler(PROTOCOL_VERSION)
+        for port in DYNAMIXEL_PORTS:
+            self.port_handler = PortHandler(port)
+            if self.port_handler.openPort():
+                self.get_logger().info(f'Opened Dynamixel port: {port}')
+                break
+            self.get_logger().warn(f'Could not open {port}, trying next...')
+        else:
+            raise RuntimeError(f'Failed to open any Dynamixel port: {DYNAMIXEL_PORTS}')
 
-        if not self.port_handler.openPort():
-            raise RuntimeError(f'Failed to open serial port {DEVICENAME}')
         if not self.port_handler.setBaudRate(BAUDRATE):
             raise RuntimeError('Failed to set baud rate')
 
@@ -214,7 +219,7 @@ class FoamControllerNode(Node):
         self.create_service(Trigger,                 '/go_home',                   self._cb_go_home)
         self.create_service(Trigger,                 '/set_home',                  self._cb_set_home)
         self.create_service(Trigger,                 '/optitrack_status',          self._cb_optitrack_status)
-        self.create_service(ExecuteMotorTrajectory,  '/execute_motor_trajectory',  self._cb_execute_motor_trajectory)
+        # self.create_service(ExecuteMotorTrajectory,  '/execute_motor_trajectory',  self._cb_execute_motor_trajectory)
 
         self._start_optitrack()
 
@@ -854,93 +859,72 @@ class FoamControllerNode(Node):
         response.message = f'Square complete: side={side:.2f} deg'
         return response
 
-    def _cb_execute_motor_trajectory(
-        self,
-        request: ExecuteMotorTrajectory.Request,
-        response: ExecuteMotorTrajectory.Response,
-    ):
-        """
-        Execute a sequence of motor position waypoints (pulses relative to home).
-
-        All four waypoint arrays must have the same length.  For each waypoint
-        the node computes absolute hardware positions (home + relative), writes
-        them to the motors, and waits until all motors arrive before advancing.
-        OptiTrack data is collected continuously across the whole trajectory.
-        """
-        if self._stop_requested:
-            response.success = False
-            response.message = 'Node is shutting down'
-            response.data_file = ''
-            return response
-
-        w1 = list(request.motor_1_waypoints)
-        w2 = list(request.motor_2_waypoints)
-        w3 = list(request.motor_3_waypoints)
-        w4 = list(request.motor_4_waypoints)
-        n  = len(w1)
-
-        if n == 0 or not (len(w2) == n and len(w3) == n and len(w4) == n):
-            response.success = False
-            response.message = 'All four waypoint arrays must be non-empty and equal length'
-            response.data_file = ''
-            return response
-
-        step_delay  = max(float(request.step_delay), 0.0)
-        label       = request.label.strip() or 'ml_trajectory'
-        output_dir  = request.output_dir.strip()
-        run_num     = int(request.run_num)
-
-        self.get_logger().info(
-            f'ExecuteMotorTrajectory: {n} waypoints, step_delay={step_delay:.2f}s, label={label}'
-        )
-
-        collecting = self._is_optitrack_live()
-        if collecting:
-            stop_event, collector, csv_path = self._start_collection(
-                label, output_dir=output_dir, run_num=run_num)
-        else:
-            self.get_logger().warn('OptiTrack not live – trajectory will execute without recording.')
-            csv_path = ''
-
-        result_ok = True
-        fail_idx  = -1
-
-        for i, (r1, r2, r3, r4) in enumerate(zip(w1, w2, w3, w4)):
-            if self._stop_requested:
-                result_ok = False
-                fail_idx  = i
-                break
-
-            abs_positions = {
-                MOTOR_NORTH: self.home_positions[MOTOR_NORTH] + int(r1),
-                MOTOR_EAST:  self.home_positions[MOTOR_EAST]  + int(r2),
-                MOTOR_SOUTH: self.home_positions[MOTOR_SOUTH] + int(r3),
-                MOTOR_WEST:  self.home_positions[MOTOR_WEST]  + int(r4),
-            }
-            self._send_absolute(abs_positions)
-
-            timeout = max(step_delay * 3.0, 5.0)
-            if not self._wait_for_all(timeout=timeout):
-                result_ok = False
-                fail_idx  = i
-                break
-
-            if step_delay > 0.0:
-                time.sleep(step_delay)
-
-        if collecting:
-            self._stop_collection(stop_event, collector)
-
-        if not result_ok:
-            response.success = False
-            response.message = f'Trajectory interrupted at waypoint {fail_idx}/{n}'
-            response.data_file = csv_path
-            return response
-
-        response.success   = True
-        response.message   = f'Trajectory complete: {n} waypoints, label={label}'
-        response.data_file = csv_path
-        return response
+    # def _cb_execute_motor_trajectory(
+    #     self,
+    #     request: ExecuteMotorTrajectory.Request,
+    #     response: ExecuteMotorTrajectory.Response,
+    # ):
+    #     if self._stop_requested:
+    #         response.success = False
+    #         response.message = 'Node is shutting down'
+    #         response.data_file = ''
+    #         return response
+    #     w1 = list(request.motor_1_waypoints)
+    #     w2 = list(request.motor_2_waypoints)
+    #     w3 = list(request.motor_3_waypoints)
+    #     w4 = list(request.motor_4_waypoints)
+    #     n  = len(w1)
+    #     if n == 0 or not (len(w2) == n and len(w3) == n and len(w4) == n):
+    #         response.success = False
+    #         response.message = 'All four waypoint arrays must be non-empty and equal length'
+    #         response.data_file = ''
+    #         return response
+    #     step_delay  = max(float(request.step_delay), 0.0)
+    #     label       = request.label.strip() or 'ml_trajectory'
+    #     output_dir  = request.output_dir.strip()
+    #     run_num     = int(request.run_num)
+    #     self.get_logger().info(
+    #         f'ExecuteMotorTrajectory: {n} waypoints, step_delay={step_delay:.2f}s, label={label}'
+    #     )
+    #     collecting = self._is_optitrack_live()
+    #     if collecting:
+    #         stop_event, collector, csv_path = self._start_collection(
+    #             label, output_dir=output_dir, run_num=run_num)
+    #     else:
+    #         self.get_logger().warn('OptiTrack not live – trajectory will execute without recording.')
+    #         csv_path = ''
+    #     result_ok = True
+    #     fail_idx  = -1
+    #     for i, (r1, r2, r3, r4) in enumerate(zip(w1, w2, w3, w4)):
+    #         if self._stop_requested:
+    #             result_ok = False
+    #             fail_idx  = i
+    #             break
+    #         abs_positions = {
+    #             MOTOR_NORTH: self.home_positions[MOTOR_NORTH] + int(r1),
+    #             MOTOR_EAST:  self.home_positions[MOTOR_EAST]  + int(r2),
+    #             MOTOR_SOUTH: self.home_positions[MOTOR_SOUTH] + int(r3),
+    #             MOTOR_WEST:  self.home_positions[MOTOR_WEST]  + int(r4),
+    #         }
+    #         self._send_absolute(abs_positions)
+    #         timeout = max(step_delay * 3.0, 5.0)
+    #         if not self._wait_for_all(timeout=timeout):
+    #             result_ok = False
+    #             fail_idx  = i
+    #             break
+    #         if step_delay > 0.0:
+    #             time.sleep(step_delay)
+    #     if collecting:
+    #         self._stop_collection(stop_event, collector)
+    #     if not result_ok:
+    #         response.success = False
+    #         response.message = f'Trajectory interrupted at waypoint {fail_idx}/{n}'
+    #         response.data_file = csv_path
+    #         return response
+    #     response.success   = True
+    #     response.message   = f'Trajectory complete: {n} waypoints, label={label}'
+    #     response.data_file = csv_path
+    #     return response
 
     # ── Cleanup ───────────────────────────────────────────────────────────────
 
