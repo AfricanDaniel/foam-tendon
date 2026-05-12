@@ -10,7 +10,7 @@ Usage:
 
     Optional:
         --speed   playback speed multiplier (default 1.0, >1 = faster)
-        --no-anim show static full-trajectory plot instead of animation
+        --animate show animated playback instead of the default static plot
 
 Coordinate convention (empirically verified from motor-direction data)
 ----------------------------------------------------------------------
@@ -541,8 +541,8 @@ def main():
         help='Playback speed multiplier (default 1.0).',
     )
     parser.add_argument(
-        '--no-anim', action='store_true',
-        help='Show a static overview plot instead of animation.',
+        '--animate', action='store_true',
+        help='Show animated playback instead of the default static overview plot.',
     )
 
     opts = parser.parse_args(args_to_parse)
@@ -568,10 +568,10 @@ def main():
         f'  Up    = NatNet Z − {home[2]:.4f}\n'
     )
 
-    if opts.no_anim:
-        plot_static(data)
-    else:
+    if opts.animate:
         plot_animated(data, speed=opts.speed)
+    else:
+        plot_static(data)
 
 
 if __name__ == '__main__':
